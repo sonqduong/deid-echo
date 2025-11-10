@@ -7,13 +7,13 @@ import math
 import os
 import random
 import re
-import sys
 from typing import Optional
 
 import matplotlib
 import numpy
 from numpy.typing import NDArray
 from pydicom.pixel_data_handlers.util import get_expected_length
+from pydicom.uid import UID, ExplicitVRLittleEndian
 
 from deid.config import DeidRecipe
 from deid.dicom import utils
@@ -25,6 +25,9 @@ matplotlib.use("pdf")
 from matplotlib import pyplot as plt  # noqa
 
 bot.level = 3
+
+# JPEG-LS Lossless Transfer Syntax UID (DICOM: 1.2.840.10008.1.2.4.80)
+_JPEGLS_LOSSLESS_UID = UID("1.2.840.10008.1.2.4.80")
 
 
 class DicomCleaner:
@@ -72,14 +75,17 @@ class DicomCleaner:
         """
         return {"family": "serif", "color": "darkred", "weight": "normal", "size": 16}
 
-    def detect(self, dicom_file):
+    def detect(self, dicom_file, **kwargs):
         """
         Initiate the cleaner for a new dicom file.
+
+        Pass-through **kwargs lets you supply allowed_rsf / allowed_rdt, e.g.:
+        cleaner.detect(path, allowed_rsf={1,2,3}, allowed_rdt={1,2,4})
         """
         from deid.dicom.pixels.detect import has_burned_pixels
 
         self.results = has_burned_pixels(
-            dicom_file, deid=self.recipe.deid, force=self.force
+            dicom_file, deid=self.recipe.deid, force=self.force, **kwargs
         )
         self.dicom_file = dicom_file
         return self.results
@@ -183,139 +189,96 @@ class DicomCleaner:
         basename = re.sub("[.]dicom|[.]dcm", "", os.path.basename(self.dicom_file))
         return "%s/cleaned-%s.%s" % (output_folder, basename, extension)
 
-    def save_png(
-        self, output_folder=None, image_type="cleaned", title=None, filename=None
-    ):
-        """
-        Save an original or cleaned dicom as png to disk.
-
-        Default image_type is "cleaned" and can be set to "original."
-        If `filename` is provided, it's used directly (no auto 'cleaned-' prefix).
-        If `filename` is missing an extension or has the wrong one, '.png' is enforced.
-        """
-        if hasattr(self, image_type):
-            png_file = self._get_clean_name(output_folder, "png", filename=filename)
-            plt = self.get_figure(image_type=image_type, title=title)
-            plt.savefig(png_file)
-            plt.close()
-            return png_file
-        else:
-            bot.warning("use detect() --> clean() before saving is possible.")
-
-    def save_animation(
-        self, output_folder=None, image_type="cleaned", title=None, filename=None
-    ):
-        """
-        Save an original or cleaned animation of a dicom.
-
-        If there are not enough frames, then save_png should be used instead.
-        If `filename` is provided, it's used directly (no auto 'cleaned-' prefix).
-        If `filename` is missing an extension or has the wrong one, '.mp4' is enforced.
-        """
-        if hasattr(self, image_type):
-            from matplotlib import animation
-
-            animation.rcParams["animation.writer"] = "ffmpeg"
-
-            image = getattr(self, image_type)
-
-            # If we have rgb, choose a channel
-
-            if len(image.shape) == 4:
-                channel = random.choice(range(image.shape[3]))
-                bot.warning("Selecting channel %s for rendering" % channel)
-                image = image[:, :, :, channel]
-
-            # Now we expect 3D, we can animate one dimension over time
-            if len(image.shape) == 3:
-                movie_file = self._get_clean_name(
-                    output_folder, "mp4", filename=filename
-                )
-
-                # First set up the figure, the axis, and the plot element we want to animate
-                fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(10, 6))
-                plt.close()
-                ax.xlim = (0, image.shape[1])
-                ax.ylim = (0, image.shape[2])
-                ax.set_xticks([])
-                ax.set_yticks([])
-                img = ax.imshow(image[0, :, :].T, cmap="gray")
-                img.set_interpolation("nearest")
-
-                # The animation function should take an index i
-                def animate(i):
-                    img.set_data(image[i, :, :].T)
-                    sys.stdout.flush()
-                    return (img,)
-
-                bot.info("Generating animation...")
-                anim = animation.FuncAnimation(
-                    fig, animate, frames=image.shape[0], interval=50, blit=True
-                )
-                anim.save(
-                    movie_file,
-                    writer="ffmpeg",
-                    fps=10,
-                    dpi=100,
-                    metadata={"title": title or "deid-animation"},
-                )
-                return movie_file
-            else:
-                bot.warning(
-                    "save_animation() is only for 4D data. Use save_png instead."
-                )
-        else:
-            bot.warning("use detect() --> clean() before saving is possible.")
-
     def save_dicom(
         self,
         output_folder=None,
         image_type="cleaned",
-        preserve_compression=False,
-        compression=None,
+        jpeg_ls: bool = True,  # hardcoded one option for compression JPEG-LS Lossless
         filename=None,
     ):
         """
         Save a cleaned dicom to disk.
 
+        Parameters
+        ----------
+        jpeg_ls : bool
+            If True (default), compress using JPEG-LS Lossless (1.2.840.10008.1.2.4.80)
+            and rewrite file_meta.TransferSyntaxUID accordingly.
+            If False, save uncompressed Explicit VR Little Endian.
+
         If `filename` is provided, it's used directly (no auto 'cleaned-' prefix).
         If `filename` is missing an extension or has the wrong one, '.dcm' is enforced.
-
-        Additional options:
-        - `preserve_compression`: if the original dicom was compressed, attempt
-           to use the same compression when saving back out to disk.
-        - `compression`: if provided, attempt to use this compression when
-           saving back out to disk.
         """
-        # Having clean also means has dicom image
-        if hasattr(self, image_type):
-            dicom_name = self._get_clean_name(output_folder, "dcm", filename=filename)
-            dicom = utils.dcmread(self.dicom_file, force=True)
-            original_transfer_syntax = dicom.file_meta.TransferSyntaxUID
-            if original_transfer_syntax.is_compressed:
-                dicom.decompress()
-            dicom.PixelData = self.cleaned.tobytes()
-            if original_transfer_syntax.is_compressed and preserve_compression:
-                try:
-                    dicom.compress(original_transfer_syntax)
-                except NotImplementedError:
-                    bot.warning(
-                        "Could not recompress dicom with %s, saving uncompressed."
-                        % original_transfer_syntax
-                    )
-            elif compression is not None:
-                try:
-                    dicom.compress(compression)
-                except NotImplementedError:
-                    bot.warning(
-                        "Could not recompress dicom with %s, saving uncompressed."
-                        % compression
-                    )
-
-            dicom.save_as(dicom_name)
-            return dicom_name
-        else:
+        if not hasattr(self, image_type):
             bot.warning("use detect() --> clean() before saving is possible.")
+            return
+
+        dicom_name = self._get_clean_name(output_folder, "dcm", filename=filename)
+        dicom = utils.dcmread(self.dicom_file, force=True)
+
+        # Log current pixel/meta
+        try:
+            shape = getattr(self, image_type).shape
+        except Exception:
+            shape = None
+        bot.debug(
+            f"[clean.save] source tsuid={dicom.file_meta.TransferSyntaxUID}, "
+            f"PI={getattr(dicom,'PhotometricInterpretation',None)}, "
+            f"SPP={getattr(dicom,'SamplesPerPixel',None)}, "
+            f"Rows={getattr(dicom,'Rows',None)}, Cols={getattr(dicom,'Columns',None)}, "
+            f"cleaned_shape={shape}"
+        )
+
+        original_ts = dicom.file_meta.TransferSyntaxUID
+        was_compressed = getattr(original_ts, "is_compressed", False)
+
+        # Decompress if needed
+        if was_compressed:
+            bot.debug(f"[clean.save] decompressing from {original_ts}")
+            dicom.decompress()
+
+        # Replace PixelData
+        dicom.PixelData = getattr(self, image_type).tobytes()
+
+        # Harmonize color metadata if pixel data is 3-channel interleaved
+        arr = getattr(self, image_type)
+        if arr.ndim in (3, 4) and (arr.shape[-1] == 3):  # RGB image or RGB cine
+            dicom.SamplesPerPixel = 3
+            dicom.PhotometricInterpretation = "RGB"
+            dicom.PlanarConfiguration = 0  # interleaved by pixel
+        elif arr.ndim in (2, 3):  # grayscale image or grayscale cine
+            dicom.SamplesPerPixel = 1
+            dicom.PhotometricInterpretation = "MONOCHROME2"
+            if "PlanarConfiguration" in dicom:
+                del dicom.PlanarConfiguration
+
+        # JPEG-LS branch or uncompressed fallback
+        if jpeg_ls:
+            try:
+                dicom.compress(_JPEGLS_LOSSLESS_UID)
+                dicom.file_meta.TransferSyntaxUID = (
+                    _JPEGLS_LOSSLESS_UID  # rewrite metadata
+                )
+                bot.debug(
+                    f"[clean.save] recompressed using JPEG-LS Lossless tsuid={_JPEGLS_LOSSLESS_UID}"
+                )
+            except NotImplementedError:
+                bot.warning(
+                    "[clean.save] JPEG-LS Lossless compression not available; saving Explicit VR Little Endian."
+                )
+                dicom.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+                bot.debug(
+                    f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}"
+                )
+        else:
+            dicom.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            bot.debug(
+                f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}"
+            )
+
+        dicom.save_as(dicom_name)
+        bot.debug(f"[clean.save] wrote: {dicom_name}")
+        return dicom_name
 
 
 def clean_pixel_data(

@@ -3,7 +3,7 @@ __copyright__ = "Copyright 2016-2025, Vanessa Sochat"
 __license__ = "MIT"
 
 
-from typing import List, Optional, Union
+from typing import Iterable, List, Optional, Union
 
 from pydicom import FileDataset
 from pydicom.sequence import Sequence
@@ -14,216 +14,14 @@ from deid.dicom.filter import apply_filter
 from deid.logger import bot
 
 
-def has_burned_pixels(
-    dicom_files, force: bool = True, deid: Optional[DeidRecipe] = None
-):
-    """
-    Determine if a dicom file has burned pixels.
-
-    has_burned_pixels is an entrypoint for has_burned_pixels_multi (for
-    multiple images) or has_burned_pixels_single (for one detailed repor)
-    We will use the MIRCTP criteria (see ref folder with the
-    original scripts used by CTP) to determine if an image is likely to have
-    PHI, based on fields in the header alone. This script does NOT perform
-    pixel cleaning, but returns a dictionary of results (for multi) or one
-    detailed result (for single)
-    """
-    # if the user has provided a custom deid, load it
-    if not isinstance(deid, DeidRecipe):
-        if deid is None:
-            deid = "dicom"
-        deid = DeidRecipe(deid)
-
-    if isinstance(dicom_files, list):
-        return _has_burned_pixels_multi(dicom_files, force, deid)
-    return _has_burned_pixels_single(dicom_files, force, deid)
-
-
-def _has_burned_pixels_multi(dicom_files: List[Union[str, FileDataset]], force, deid):
-    """
-    Determine if one or more dicom files have burned pixels.
-
-    return a summary dictionary with lists of clean, and then lookups
-    for flagged images with reasons. The deid should be a deid recipe
-    instantiated from deid.config.DeidRecipe. This function should not
-    be called directly, but should be called from has_burned_pixels
-    """
-
-    # Store decisions in lookup based on filter groups
-    decision = {"clean": [], "flagged": {}}
-
-    for dicom_file in dicom_files:
-        result = _has_burned_pixels_single(
-            dicom_file=dicom_file, force=force, deid=deid
-        )
-
-        if result["flagged"] is False:
-            # In this case, group is None
-            decision["clean"].append(dicom_file)
-        else:
-            decision["flagged"][dicom_file] = result
-
-    return decision
-
-
-def _has_burned_pixels_single(dicom_file, force: bool, deid):
-    """
-    Determine if a single dicom has burned pixels.
-
-    has burned pixels single will evaluate one dicom file for burned in
-    pixels based on 'filter' criteria in a deid. If deid is not provided,
-    will use application default. The method proceeds as follows:
-
-    1. deid is loaded, with criteria groups ordered from specific --> general
-    2. image is run down the criteria, stops when hits and reports FLAG
-    3. passing through the entire list gives status of pass
-
-    The default deid has a greylist, whitelist, then blacklist
-
-    Parameters
-    =========
-    dicom_file: the fullpath to the file to evaluate
-    force: force reading of a potentially erroneous file
-    deid: the full path to a deid specification. if not defined, only default used
-
-    deid['filter']['dangerouscookie'] <-- filter list "dangerouscookie"
-
-    --> This is what an item in the criteria looks like
-         [{'coordinates': ['0,0,512,110'],
-           'filters': [{'InnerOperators': [],
-           'action': ['notequals'],
-           'field': ['OperatorsName'],
-           'operator': 'and',
-           'value': ['bold bread']}],
-         'name': 'criteria for dangerous cookie'}]
-
-
-    Returns
-    =======
-    --> This is what a clean image looks like:
-        {'flagged': False, 'results': []}
-
-    --> This is what a flagged image looks like:
-       {'flagged': True,
-        'results': [
-               {'reason': ' ImageType missing  or ImageType empty ',
-                'group': 'blacklist',
-                'coordinates': []}
-            ]
-        }
-    """
-    dicom = utils.load_dicom(dicom_file, force=force)
-
-    # Return list with lookup as dicom_file
-    results = []
-    global_flagged = False
-
-    # Load criteria (actions) for flagging
-    filters = deid.get_filters()
-    if not filters:
-        bot.warning("Deid provided does not have %filter.")
-        return {"flagged": global_flagged, "results": results}
-
-    for name, items in filters.items():
-        for item in items:
-            flags = []
-
-            descriptions = []  # description for each group across items
-
-            # If there aren't any filters but we have coordinates, assume True
-            if not item.get("filters") and item.get("coordinates"):
-                this_item_flags = [True]
-                group_descriptions = [item.get("name", "")]
-
-            else:
-                this_item_flags = []  # evaluation for a single line
-                group_descriptions = []
-                for group in item["filters"]:
-                    this_group_flags = []
-                    # You cannot pop from the list
-                    for a in range(len(group["action"])):
-                        action = group["action"][a]
-                        field = group["field"][a]
-                        value = ""
-
-                        if len(group["value"]) > a:
-                            value = group["value"][a]
-
-                        flag = apply_filter(
-                            dicom=dicom,
-                            field=field,
-                            filter_name=action,
-                            value=value or None,
-                        )
-                        this_group_flags.append(flag)
-                        description = "%s %s %s" % (field, action, value)
-
-                        if len(group["InnerOperators"]) > a:
-                            inner_operator = group["InnerOperators"][a]
-                            this_group_flags.append(inner_operator)
-                            description = "%s %s" % (description, inner_operator)
-
-                        group_descriptions.append(description)
-
-                    overall_group_flag = evaluate_group(this_group_flags)
-                    this_item_flags.append(overall_group_flag)
-
-            # At the end of a group, evaluate the inner group
-            flag = evaluate_group(this_item_flags)
-
-            # "Operator" is relevant for the outcome of the list of actions
-            operator = ""
-            if "operator" in group:
-                if group["operator"] is not None:
-                    operator = group["operator"]
-                    flags.append(operator)
-
-            flags.append(flag)
-            reason = ("%s %s" % (operator, " ".join(group_descriptions))).replace(
-                "\n", " "
-            )
-            descriptions.append(reason)
-
-            # When we parse through a group, we evaluate based on all flags
-            flagged = evaluate_group(flags=flags)
-
-            if flagged is True:
-                global_flagged = True
-                reason = " ".join(descriptions)
-
-                # Each coordinate is a list with [value, [coordinate]]
-                # and if from: in the coordinate value, it indicates we get
-                # the coordinate from some field (done here)
-                for coordset in item["coordinates"]:
-                    if "from:" in coordset[1]:
-                        coordset[1] = extract_coordinates(dicom, coordset[1])
-
-                result = {
-                    "reason": reason,
-                    "group": name,
-                    "coordinates": item["coordinates"],
-                }
-
-                results.append(result)
-
-    results = {"flagged": global_flagged, "results": results}
-    return results
-
-
 def evaluate_group(flags):
     """
-    Evaluate group will take a list of flags (e.g.,
-
-     [True, and, False, or, True]
-
-    And read through the logic to determine if the image result
-    is to be flagged. This is how we combine a set of criteria in
-    a group to come to a final decision.
+    Evaluate group will take a list of flags (e.g., [True, 'and', False, 'or', True])
     """
     flagged = False
     first_entry = True
 
-    # If it starts with and and/or, remove it
+    # If it starts with and/or, remove it
     if flags and flags[0] in ["and", "or"]:
         flags.pop(0)
 
@@ -236,62 +34,264 @@ def evaluate_group(flags):
             flag = flags.pop(0)
             flagged = flag or flagged
         else:
-            # If it's the first entry
-            if first_entry is True:
-                flagged = flag
-            else:
-                flagged = flagged and flag
+            flagged = flag if first_entry else (flagged and flag)
         first_entry = False
-
     return flagged
 
 
-def extract_coordinates(dicom, field):
+def has_burned_pixels(
+    dicom_files,
+    force: bool = True,
+    deid: Optional[DeidRecipe] = None,
+    allowed_rsf: Optional[Iterable[int]] = (1, 2, 3),
+    allowed_rdt: Optional[Iterable[int]] = None,
+):
     """
-    Given a field that is provided for a dicom, extract coordinates
+    Determine if a dicom file has burned pixels.
+
+    Parameters added:
+    - allowed_rsf: iterable of RegionSpatialFormat integers to keep when extracting
+      coordinates from SequenceOfUltrasoundRegions. Defaults to (1,2,3).
+    - allowed_rdt: optional iterable of RegionDataType integers to keep (None = ignore).
+    """
+    if not isinstance(deid, DeidRecipe):
+        if deid is None:
+            deid = "dicom"
+        deid = DeidRecipe(deid)
+
+    if isinstance(dicom_files, list):
+        return _has_burned_pixels_multi(
+            dicom_files, force, deid, allowed_rsf=allowed_rsf, allowed_rdt=allowed_rdt
+        )
+    return _has_burned_pixels_single(
+        dicom_files, force, deid, allowed_rsf=allowed_rsf, allowed_rdt=allowed_rdt
+    )
+
+
+def _has_burned_pixels_multi(
+    dicom_files: List[Union[str, FileDataset]],
+    force,
+    deid,
+    *,
+    allowed_rsf: Optional[Iterable[int]],
+    allowed_rdt: Optional[Iterable[int]],
+):
+    decision = {"clean": [], "flagged": {}}
+    bot.debug(f"[detect] evaluating {len(dicom_files)} files")
+
+    for dicom_file in dicom_files:
+        result = _has_burned_pixels_single(
+            dicom_file=dicom_file,
+            force=force,
+            deid=deid,
+            allowed_rsf=allowed_rsf,
+            allowed_rdt=allowed_rdt,
+        )
+        if result["flagged"] is False:
+            decision["clean"].append(dicom_file)
+        else:
+            decision["flagged"][dicom_file] = result
+    return decision
+
+
+def _has_burned_pixels_single(
+    dicom_file,
+    force: bool,
+    deid,
+    *,
+    allowed_rsf: Optional[Iterable[int]],
+    allowed_rdt: Optional[Iterable[int]],
+):
+    bot.debug(f"[detect] loading DICOM: {dicom_file}")
+    dicom = utils.load_dicom(dicom_file, force=force)
+
+    results = []
+    global_flagged = False
+
+    filters = deid.get_filters()
+    if not filters:
+        bot.warning("Deid provided does not have %filter.")
+        return {"flagged": global_flagged, "results": results}
+
+    for name, items in filters.items():
+        bot.debug(f"[detect] applying filter group: {name} (items={len(items)})")
+        for item_idx, item in enumerate(items):
+            flags = []
+            descriptions = []
+            last_group = {}  # prevent unbound access later
+
+            # A) no header filters, only coordinates → treat as True match
+            if not item.get("filters") and item.get("coordinates"):
+                this_item_flags = [True]
+                group_descriptions = [item.get("name", "")]
+                bot.debug(
+                    f"[detect] item#{item_idx}: no filters, coordinates present → match=True"
+                )
+            else:
+                this_item_flags = []
+                group_descriptions = []
+                for group_idx, group in enumerate(item.get("filters", [])):
+                    last_group = group
+                    this_group_flags = []
+                    for a in range(len(group["action"])):
+                        action = group["action"][a]
+                        field = group["field"][a]
+                        value = group["value"][a] if len(group["value"]) > a else ""
+
+                        flag = apply_filter(
+                            dicom=dicom,
+                            field=field,
+                            filter_name=action,
+                            value=value or None,
+                        )
+                        this_group_flags.append(flag)
+                        desc = f"{field} {action} {value}"
+                        if len(group.get("InnerOperators", [])) > a:
+                            inner_op = group["InnerOperators"][a]
+                            this_group_flags.append(inner_op)
+                            desc = f"{desc} {inner_op}"
+                        group_descriptions.append(desc)
+                        bot.debug(f"[detect]   group#{group_idx} eval: {desc} → {flag}")
+
+                    overall_group_flag = evaluate_group(this_group_flags)
+                    this_item_flags.append(overall_group_flag)
+                    bot.debug(
+                        f"[detect]   group#{group_idx} overall → {overall_group_flag}"
+                    )
+
+            # Evaluate the item-level result
+            item_flag = evaluate_group(this_item_flags)
+
+            # Combine with item-level operator (if present)
+            operator = ""
+            if isinstance(last_group, dict) and last_group.get("operator") is not None:
+                operator = last_group["operator"]
+                flags.append(operator)
+
+            flags.append(item_flag)
+            reason = (f"{operator} " + " ".join(group_descriptions)).replace("\n", " ")
+            descriptions.append(reason)
+
+            flagged = evaluate_group(flags=flags)
+            bot.debug(
+                f"[detect] item#{item_idx} item_flag={item_flag} operator={operator!r} → flagged={flagged}"
+            )
+
+            if flagged is True:
+                global_flagged = True
+                reason = " ".join(descriptions)
+
+                # Resolve any "from:" coordinate sources with RSF/RDT filtering
+                coords_before = sum(
+                    len(cs[1]) if isinstance(cs[1], list) else 1
+                    for cs in item.get("coordinates", [])
+                )
+                for c_idx, coordset in enumerate(item.get("coordinates", [])):
+                    # coordset is expected like: [mask_value, coordinates_or_from_str]
+                    if len(coordset) != 2:
+                        bot.warning(
+                            f"[detect]   coordset#{c_idx} malformed: {coordset!r}"
+                        )
+                        continue
+                    mask_value, coord_spec = coordset
+                    if isinstance(coord_spec, str) and coord_spec.startswith("from:"):
+                        new_coords = extract_coordinates(
+                            dicom,
+                            coord_spec,
+                            allowed_rsf=allowed_rsf,
+                            allowed_rdt=allowed_rdt,
+                        )
+                        bot.debug(
+                            f"[detect]   coordset#{c_idx} resolved from {coord_spec!r} "
+                            f"→ {len(new_coords)} coords (allowed_rsf={allowed_rsf}, allowed_rdt={allowed_rdt})"
+                        )
+                        coordset[1] = new_coords
+                coords_after = sum(
+                    len(cs[1]) if isinstance(cs[1], list) else 1
+                    for cs in item.get("coordinates", [])
+                )
+                bot.debug(
+                    f"[detect] coordinates resolved: before={coords_before}, after={coords_after}"
+                )
+
+                results.append(
+                    {
+                        "reason": reason,
+                        "group": name,
+                        "coordinates": item.get("coordinates", []),
+                    }
+                )
+
+    bot.debug(f"[detect] finished: flagged={global_flagged}, results={len(results)}")
+    return {"flagged": global_flagged, "results": results}
+
+
+def extract_coordinates(
+    dicom,
+    field: str,
+    *,
+    allowed_rsf: Optional[Iterable[int]] = (1, 2, 3),
+    allowed_rdt: Optional[Iterable[int]] = None,
+):
+    """
+    Given a field that is provided for a dicom, extract coordinates.
+    Filters SequenceOfUltrasoundRegions by RegionSpatialFormat (and optional RegionDataType).
     """
     field = field.replace("from:", "", 1)
     coordinates = []
     if field not in dicom:
+        bot.debug(f"[detect] extract_coordinates: field {field!r} not in dicom")
         return coordinates
 
-    regions = []
-    region = dicom.get(field)
+    # Normalize selections to sets (or None)
+    rsf_set = set(allowed_rsf) if allowed_rsf is not None else None
+    rdt_set = set(allowed_rdt) if allowed_rdt is not None else None
 
-    # First put list of attributes together
-    if isinstance(region, Sequence):
-        for entry in region:
-            regions.append(entry)
-    else:
-        regions.append(region)
+    region_elem = dicom.get(field)
+    regions = list(region_elem) if isinstance(region_elem, Sequence) else [region_elem]
+    bot.debug(
+        f"[detect] extract_coordinates: regions={len(regions)}, rsf_allow={rsf_set}, rdt_allow={rdt_set}"
+    )
 
-    # Now extract coordinates
-    for region in regions:
-        if (
-            "RegionLocationMinX0" in region
-            and "RegionLocationMinY0" in region
-            and "RegionLocationMaxX1" in region
-            and "RegionLocationMaxY1" in region
-        ):
-            # https://gist.github.com/vsoch/df6957be12c34e62b21000603f1687e5
-            # minr, minc, maxr, maxc = coordinate
-            # self.cleaned[minc:maxc, minr:maxr] = 0  # should fill with black
-            # self.cleaned[A:B, C:D]
-            # image[A:B,C:D]
-            # A: refers to ymin
-            # B: refers to ymax
-            # C: refers xmin
-            # D: refers to xmax
-            # self.cleaned[ymin:ymax, xmin:xmax]
-            # coordinate must be [xmin, ymin, xmax, ymax]
-            # x0,y0,x1,y1.
-            coordinates.append(
-                "%s,%s,%s,%s"
-                % (
-                    region.RegionLocationMinX0,
-                    region.RegionLocationMinY0,
-                    region.RegionLocationMaxX1,
-                    region.RegionLocationMaxY1,
-                )
+    for i, region in enumerate(regions):
+        rsf = getattr(region, "RegionSpatialFormat", None)
+        rdt = getattr(region, "RegionDataType", None)
+        try:
+            rsf_i = int(rsf) if rsf is not None else None
+        except Exception:
+            rsf_i = None
+        try:
+            rdt_i = int(rdt) if rdt is not None else None
+        except Exception:
+            rdt_i = None
+
+        if rsf_set is not None and rsf_i not in rsf_set:
+            bot.debug(f"[detect]   region#{i} skip rsf={rsf_i}")
+            continue
+        if rdt_set is not None and rdt_i not in rdt_set:
+            bot.debug(f"[detect]   region#{i} skip rdt={rdt_i}")
+            continue
+
+        have_all = all(
+            hasattr(region, attr)
+            for attr in (
+                "RegionLocationMinX0",
+                "RegionLocationMinY0",
+                "RegionLocationMaxX1",
+                "RegionLocationMaxY1",
             )
+        )
+        if have_all:
+            xmin = int(region.RegionLocationMinX0)
+            ymin = int(region.RegionLocationMinY0)
+            xmax = int(region.RegionLocationMaxX1)
+            ymax = int(region.RegionLocationMaxY1)
+            coordinates.append(f"{xmin},{ymin},{xmax},{ymax}")
+            bot.debug(
+                f"[detect]   region#{i} add coord [{xmin},{ymin},{xmax},{ymax}] (rsf={rsf_i}, rdt={rdt_i})"
+            )
+        else:
+            bot.debug(f"[detect]   region#{i} missing location tags; skipping")
+
+    bot.debug(f"[detect] extract_coordinates: returned {len(coordinates)} coords")
     return coordinates
