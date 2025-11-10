@@ -1,9 +1,20 @@
 [tool.black]
 line-length = 88
+target-version = ["py311"]
+# regex string (triple-quoted) — not a list
 exclude = '''
-^env/
+/(
+  \.git
+ | \.hg
+ | \.mypy_cache
+ | \.tox
+ | \.venv
+ | build
+ | dist
+ | docs/_build
+)/
 '''
 
 [tool.isort]
-profile = "black" # needed for black/isort compatibility
+profile = "black"
 skip = []
