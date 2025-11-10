@@ -42,3 +42,6 @@ Temporary Items
 
 # PyCharm
 .idea/
+
+# test artifacts
+testingscripts/

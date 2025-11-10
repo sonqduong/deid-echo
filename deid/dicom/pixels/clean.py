@@ -132,22 +132,49 @@ class DicomCleaner:
                 plt.show()
             return plt
 
-    def _get_clean_name(self, output_folder, extension="dcm"):
+    def _get_clean_name(self, output_folder, extension="dcm", filename=None):
         """
-        Get path to a cleaned output file.
+        Get path to an output file.
 
-        Return a full path to an output file, with custom folder and
-        extension. If the output folder isn't yet created, make it.
+        If `filename` is provided, use it as-is (no auto 'cleaned-' prefix), ensuring
+        the expected extension. If `filename` is not provided, fall back to the
+        original behavior that prefixes with 'cleaned-'.
 
         Parameters
         ==========
-        output_folder: the output folder to create, will be created if doesn't
-        exist.
-        extension: the extension of the file to create a name for, should
-        not start with "."
+        output_folder: the output folder to create, will be created if doesn't exist.
+        extension: the extension of the file to create a name for, should not start with "."
+        filename: optional explicit filename or path to use for saving (no auto-suffix).
         """
         if output_folder is None:
             output_folder = self.output_folder
+
+        expected_ext = "." + extension.lstrip(".")
+
+        if filename:
+            target = filename
+            # If filename is not an absolute path and doesn't include a separator, join with output_folder
+            if not os.path.isabs(target) and os.sep not in target:
+                if not os.path.exists(output_folder):
+                    bot.debug("Creating output folder %s" % output_folder)
+                    os.makedirs(output_folder)
+                target = os.path.join(output_folder, filename)
+            else:
+                parent = os.path.dirname(target)
+                if parent and not os.path.exists(parent):
+                    bot.debug("Creating parent folder %s" % parent)
+                    os.makedirs(parent)
+
+            root, ext_in = os.path.splitext(target)
+            if not ext_in:
+                target = root + expected_ext
+            elif ext_in.lower() != expected_ext.lower():
+                bot.warning(
+                    "Replacing file extension %s with %s for output format."
+                    % (ext_in, expected_ext)
+                )
+                target = root + expected_ext
+            return target
 
         if not os.path.exists(output_folder):
             bot.debug("Creating output folder %s" % output_folder)
@@ -156,17 +183,18 @@ class DicomCleaner:
         basename = re.sub("[.]dicom|[.]dcm", "", os.path.basename(self.dicom_file))
         return "%s/cleaned-%s.%s" % (output_folder, basename, extension)
 
-    def save_png(self, output_folder=None, image_type="cleaned", title=None):
+    def save_png(
+        self, output_folder=None, image_type="cleaned", title=None, filename=None
+    ):
         """
         Save an original or cleaned dicom as png to disk.
 
-        Default image_format is "cleaned" and can be set to "original." If the
-        image was already clean (not flagged) the cleaned image is just a
-        copy of original. If a 4d image is provided, we save the dimension
-        specified (or if not provided, a randomly chosen dimension).
+        Default image_type is "cleaned" and can be set to "original."
+        If `filename` is provided, it's used directly (no auto 'cleaned-' prefix).
+        If `filename` is missing an extension or has the wrong one, '.png' is enforced.
         """
         if hasattr(self, image_type):
-            png_file = self._get_clean_name(output_folder, "png")
+            png_file = self._get_clean_name(output_folder, "png", filename=filename)
             plt = self.get_figure(image_type=image_type, title=title)
             plt.savefig(png_file)
             plt.close()
@@ -174,11 +202,15 @@ class DicomCleaner:
         else:
             bot.warning("use detect() --> clean() before saving is possible.")
 
-    def save_animation(self, output_folder=None, image_type="cleaned", title=None):
+    def save_animation(
+        self, output_folder=None, image_type="cleaned", title=None, filename=None
+    ):
         """
         Save an original or cleaned animation of a dicom.
 
         If there are not enough frames, then save_png should be used instead.
+        If `filename` is provided, it's used directly (no auto 'cleaned-' prefix).
+        If `filename` is missing an extension or has the wrong one, '.mp4' is enforced.
         """
         if hasattr(self, image_type):
             from matplotlib import animation
@@ -196,7 +228,9 @@ class DicomCleaner:
 
             # Now we expect 3D, we can animate one dimension over time
             if len(image.shape) == 3:
-                movie_file = self._get_clean_name(output_folder, "mp4")
+                movie_file = self._get_clean_name(
+                    output_folder, "mp4", filename=filename
+                )
 
                 # First set up the figure, the axis, and the plot element we want to animate
                 fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(10, 6))
@@ -239,13 +273,13 @@ class DicomCleaner:
         image_type="cleaned",
         preserve_compression=False,
         compression=None,
+        filename=None,
     ):
         """
         Save a cleaned dicom to disk.
 
-        We expose an option to save an original (change image_type to "original"
-        to be consistent, although this is not incredibly useful given it would
-        duplicate the original data.
+        If `filename` is provided, it's used directly (no auto 'cleaned-' prefix).
+        If `filename` is missing an extension or has the wrong one, '.dcm' is enforced.
 
         Additional options:
         - `preserve_compression`: if the original dicom was compressed, attempt
@@ -255,7 +289,7 @@ class DicomCleaner:
         """
         # Having clean also means has dicom image
         if hasattr(self, image_type):
-            dicom_name = self._get_clean_name(output_folder)
+            dicom_name = self._get_clean_name(output_folder, "dcm", filename=filename)
             dicom = utils.dcmread(self.dicom_file, force=True)
             original_transfer_syntax = dicom.file_meta.TransferSyntaxUID
             if original_transfer_syntax.is_compressed:

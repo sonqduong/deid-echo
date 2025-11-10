@@ -1,6 +1,8 @@
 [tool.black]
-profile = "black"
-exclude = ["^env/"]
+line-length = 88
+exclude = '''
+^env/
+'''
 
 [tool.isort]
 profile = "black" # needed for black/isort compatibility
