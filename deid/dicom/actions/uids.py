@@ -2,6 +2,7 @@ __author__ = "Vanessa Sochat"
 __copyright__ = "Copyright 2016-2025, Vanessa Sochat"
 __license__ = "MIT"
 
+import os
 import uuid
 
 from pydicom.uid import generate_uid as pydicom_generate_uid
@@ -39,6 +40,47 @@ def pydicom_uuid(item, value, field, **kwargs):
     if stable_remapping is True:
         original = str(field.element.value)
         entropy_srcs.append(original)
+    return pydicom_generate_uid(prefix=prefix, entropy_srcs=entropy_srcs)
+
+
+def salted_pydicom_uuid(item, value, field, **kwargs):
+    """
+    Use pydicom to generate the UID with additional entropy from SECRET_SALT.
+
+    Optional extras:
+      - prefix (str): provide a custom prefix
+      - stable_remapping (bool): if true, use the original value + SECRET_SALT
+        for entropy. This ensures stability across runs that use the same UID
+        and the same SECRET_SALT.
+
+    The prefix must match '^(0|[1-9][0-9]*)(\\.(0|[1-9][0-9]*))*\\.$'
+
+    SECRET_SALT environment variable MUST be set or this function will raise.
+    """
+    opts = parse_keyvalue_pairs(kwargs.get("extras"))
+
+    # We always provide a prefix so the stable remapping is done
+    prefix = opts.get("prefix", "2.25.")
+    # Hardcode stable_remapping to True regardless of extras
+    stable_remapping = True
+    entropy_srcs = []
+
+    # Require salt for this function
+    salt = os.getenv("SECRET_SALT")
+    if not salt:
+        raise RuntimeError(
+            "SECRET_SALT environment variable must be set for salted_pydicom_uuid."
+        )
+
+    if hasattr(field, "element"):
+        original = str(field.element.value)
+    else:
+        # Fallback to provided value if element is not available
+        original = str(value)
+
+    if stable_remapping is True:
+        entropy_srcs.append(original + salt)
+
     return pydicom_generate_uid(prefix=prefix, entropy_srcs=entropy_srcs)
 
 
