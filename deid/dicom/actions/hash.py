@@ -1,3 +1,7 @@
+__author__ = "Son Duong"
+__copyright__ = "Copyright 2025"
+__license__ = "MIT"
+
 import hashlib
 import os
 
