@@ -1,5 +1,5 @@
-__author__ = "Vanessa Sochat"
-__copyright__ = "Copyright 2016-2025, Vanessa Sochat"
+__author__ = "Vanessa Sochat, Son Duong"
+__copyright__ = "Copyright 2016-2025"
 __license__ = "MIT"
 
 import os
