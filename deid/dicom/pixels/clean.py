@@ -235,7 +235,7 @@ class DicomCleaner:
         # Decompress if needed
         if was_compressed:
             bot.debug(f"[clean.save] decompressing from {original_ts}")
-            dicom.decompress()
+            dicom.decompress(generate_instance_uid=False)
 
         # Replace PixelData
         dicom.PixelData = getattr(self, image_type).tobytes()
@@ -255,7 +255,7 @@ class DicomCleaner:
         # JPEG-LS branch or uncompressed fallback
         if jpeg_ls:
             try:
-                dicom.compress(_JPEGLS_LOSSLESS_UID)
+                dicom.compress(_JPEGLS_LOSSLESS_UID, generate_instance_uid=False)
                 dicom.file_meta.TransferSyntaxUID = (
                     _JPEGLS_LOSSLESS_UID  # rewrite metadata
                 )
