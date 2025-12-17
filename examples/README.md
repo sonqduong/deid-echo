@@ -1,8 +1,5 @@
 # Examples
 
- - [Example deid spec files](deid): are found in the folder [deid](deid)
- - [Example dicom scripts](dicom): are found in the folder [dicom](dicom)
+These folders contain examples from the prior deid version. See main README for how to run deid-echo specifically
 
-For detailed walk throughs, please reference our [docs](https://pydicom.github.io/deid).
-For questions, issues, suggestions, or if you want to help out,
-please [open an issue](https://www.github.com/pydicom/deid).
+For detailed walk throughs please refer to the original deid documentation, please reference(https://pydicom.github.io/deid) and (https://www.github.com/pydicom/deid).

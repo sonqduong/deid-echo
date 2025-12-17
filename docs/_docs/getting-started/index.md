@@ -5,11 +5,7 @@ permalink: /getting-started/index.html
 order: 1
 ---
 
-Deid does two things: clean header and image data, and filter based on headers.
-These algorithms are not sophisticated - they perform their duties based on
-parsing header metadata. Here we will provide a simple walkthrough to get started
-with deid. In the following pages, we will show you how to load data,
-configure a custom recipe to deidentify and filter, and then clean pixels.
+Deid-echo cleans header and image data and filters based on headers. This fork is tuned for echocardiogram ultrasound pipelines; defaults and recipes have not been validated for other modalities. Parallel runner scripts in deidecho_run/ help batch large echo cohorts across multiple processes.
 
 ## Dicom Pipeline
 
@@ -21,5 +17,4 @@ A complete deid pipeline typically means some level of cleaning and filtering, a
  - [Clean Pixels]({{ site.baseurl }}/getting-started/dicom-pixels): Before you scrape headers, you might need to use them to flag images.
  - [Put Identifiers]({{ site.baseurl }}/getting-started/dicom-put): A "put" corresponds to putting cleaned headers back into the images.
 
-If you are interested in other examples (with snippets of code) see our [examples]({{ site.baseurl }}/examples/) pages.
-For more detailed user documentation on writing recipes, see the [user documentation]({{ site.baseurl }}/user-docs/) base.
+If you are interested in other examples (with snippets of code) see our [examples]({{ site.baseurl }}/examples/) pages. For more detailed user documentation on writing recipes, see the [user documentation]({{ site.baseurl }}/user-docs/) base.

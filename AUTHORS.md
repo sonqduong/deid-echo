@@ -1,4 +1,7 @@
-# Project Lead:
+# Echo Deid Author
+    - Son Duong <son.duong@mssm.edu>
+
+# Original Deid Project Lead:
 
     - Vanessa Sochat <vsochat@stanford.edu>
 

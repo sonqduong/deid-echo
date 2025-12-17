@@ -1,0 +1,213 @@
+FORMAT dicom
+
+%filter test
+
+LABEL Start with 0s
+  present SequenceOfUltrasoundRegions
+  coordinates all
+
+# If ultrasound regions exist, keep exactly those regions (dont mask them)
+LABEL Keep Ultrasound Regions
+  present SequenceOfUltrasoundRegions
+  keepcoordinates from:SequenceOfUltrasoundRegions
+
+%header
+# Note if using contains function it superscedes remove function so best not to use contains for replace 
+REPLACE PatientID deid_func:id_hash
+
+REPLACE SOPInstanceUID deid_func:pydicom_uuid_salt
+REPLACE StudyInstanceUID deid_func:pydicom_uuid_salt
+REPLACE SeriesInstanceUID deid_func:pydicom_uuid_salt
+REPLACE MediaStorageSOPInstanceUID deid_func:pydicom_uuid_salt
+REPLACE ReferencedSOPInstanceUID deid_func:pydicom_uuid_salt
+
+REPLACE StudyDate deid_func:jitter
+REPLACE PatientBirthDate deid_func:jitter
+
+
+
+REMOVE ImplementationClassUID
+
+REMOVE AccessionNumber
+REMOVE AcquisitionContextSequence
+REMOVE AdmittingDiagnosesDescription
+REMOVE AdmissionID
+REMOVE Allergies
+REMOVE AssignedLocation
+REMOVE BranchOfService
+REMOVE CassetteID
+REMOVE ClinicalTrialProtocolEthicsCommitteeName
+REMOVE ClinicalTrialSponsorName
+REMOVE CommentsOnThePerformedProcedureStep
+REMOVE ConcatenationUID
+REMOVE ConsultingPhysicianIdentificationSequence
+REMOVE ConsultingPhysicianName
+REMOVE ContentCreatorName
+REMOVE ContributingEquipmentSequence
+REMOVE CountryOfResidence
+REMOVE CurrentPatientLocation
+REMOVE CurveDate
+REMOVE CurveTime
+REMOVE DateOfSecondaryCapture
+REMOVE DerivationDescription
+REMOVE DetectorID
+REMOVE DeviceSerialNumber
+REMOVE DigitalSignaturesSequence
+REMOVE DimensionIndexSequence
+REMOVE DimensionOrganizationSequence
+REMOVE DimensionOrganizationUID
+REMOVE EvaluatorName
+REMOVE FillerOrderNumberImagingServiceRequest
+REMOVE FrameOfReferenceUID
+REMOVE GantryID
+REMOVE GeneratorID
+REMOVE GroupOfPatientsIdentificationSequence
+REMOVE HumanPerformerName
+REMOVE IconImageSequence
+REMOVE ImageComments
+REMOVE ImageType
+REMOVE ImplementationVersionName
+REMOVE InstitutionAddress
+REMOVE InstitutionalDepartmentName
+REMOVE InstitutionName
+REMOVE InstanceCreationDate
+REMOVE InstanceCreationTime
+REMOVE InstanceCreatorUID
+REMOVE InsurancePlanIdentification
+REMOVE IrradiationEventUID
+REMOVE IssuerOfAccessionNumberSequence
+REMOVE IssuerOfAdmissionID
+REMOVE IssuerOfAdmissionIDSequence
+REMOVE IssuerOfPatientID
+REMOVE IssuerOfPatientIDQualifiersSequence
+REMOVE IssuerOfServiceEpisodeID
+REMOVE IssuerOfServiceEpisodeIDSequence
+REMOVE LastMenstrualDate
+REMOVE MedicalAlerts
+REMOVE MedicalRecordLocator
+REMOVE MilitaryRank
+REMOVE NameOfPhysiciansReadingStudy
+REMOVE NamesOfIntendedRecipientsOfResults
+REMOVE Occupation
+REMOVE OperatorIdentificationSequence
+REMOVE OperatorsName
+REMOVE OrderEntererLocation
+REMOVE OriginalAttributesSequence
+REMOVE OtherPatientIDs
+REMOVE OtherPatientIDsSequence
+REMOVE OtherPatientNames
+REMOVE OverlayBitPosition
+REMOVE OverlayBitsAllocated
+REMOVE OverlayColumns
+REMOVE OverlayData
+REMOVE OverlayDate
+REMOVE OverlayDescription
+REMOVE OverlayLabel
+REMOVE OverlayOrigin
+REMOVE OverlayRows
+REMOVE OverlaySubtype
+REMOVE OverlayTime
+REMOVE OverlayType
+REMOVE PatientAddress
+REMOVE PatientAge
+REMOVE PatientBirthName
+REMOVE PatientBirthTime
+REMOVE PatientComments
+REMOVE PatientDeathDateInAlternativeCalendar
+REMOVE PatientInstitutionResidence
+REMOVE PatientInsurancePlanCodeSequence
+REMOVE PatientMotherBirthName
+REMOVE PatientPrimaryLanguageCodeSequence
+REMOVE PatientReligiousPreference
+REMOVE PatientsName
+REMOVE PatientSexNeutered
+REMOVE PatientState
+REMOVE PatientTelecomInformation
+REMOVE PatientTelephoneNumbers
+REMOVE PatientTransportArrangements
+REMOVE PerformedLocation
+REMOVE PerformedProcedureStepDescription
+REMOVE PerformedProcedureStepEndDate
+REMOVE PerformedProcedureStepID
+REMOVE PerformedProcedureStepStartDate
+REMOVE PerformedProcedureStepStartTime
+REMOVE PerformedProtocolCodeSequence
+REMOVE PerformedStationName
+REMOVE PerformingPhysicianIdentificationSequence
+REMOVE PerformingPhysicianName
+REMOVE PersonAddress
+REMOVE PersonName
+REMOVE PersonTelephoneNumbers
+REMOVE PhysicianApprovingInterpretation
+REMOVE PhysiciansOfRecord
+REMOVE PhysiciansOfRecordIdentificationSequence
+REMOVE PhysiciansReadingStudyIdentificationSequence
+REMOVE PlateID
+REMOVE PregnancyStatus
+REMOVE PresentationIntentType
+REMOVE ProcedureCodeSequence
+REMOVE ProcessingFunction
+REMOVE ProtocolName
+REMOVE ReasonForStudy
+REMOVE ReferencedImageSequence
+REMOVE ReferencedPatientPhotoSequence
+REMOVE ReferencedPatientSequence
+REMOVE ReferencedPerformedProcedureStepSequence
+REMOVE ReferencedSeriesSequence
+REMOVE ReferencedStudySequence
+REMOVE ReferringPhysicianAddress
+REMOVE ReferringPhysicianIdentificationSequence
+REMOVE ReferringPhysicianName
+REMOVE ReferringPhysicianTelephoneNumbers
+REMOVE RegionOfResidence
+REMOVE RelatedSeriesSequence
+REMOVE RequestAttributesSequence
+REMOVE RequestedProcedureDescription
+REMOVE RequestedProcedureID
+REMOVE RequestingPhysician
+REMOVE RequestingPhysicianIdentificationSequence
+REMOVE RequestingService
+REMOVE ResponsibleOrganization
+REMOVE ResponsiblePerson
+REMOVE RetrieveURI
+REMOVE ReviewerName
+REMOVE ScheduledPerformingPhysicianIdentificationSequence
+REMOVE ScheduledPerformingPhysicianName
+REMOVE ScheduledProcedureStepEndDate
+REMOVE ScheduledProcedureStepStartDate
+REMOVE ScheduledStudyLocation
+REMOVE ScheduledStudyLocationAETitle
+REMOVE SecondaryReviewerName
+REMOVE SeriesTime
+REMOVE ServiceEpisodeDescription
+REMOVE ServiceEpisodeID
+REMOVE SourceApplicatorName
+REMOVE SourceApplicationEntityTitle
+REMOVE SourceImageSequence
+REMOVE SourcePatientGroupIdentificationSequence
+REMOVE StationName
+REMOVE StudiesContainingOtherReferencedInstancesSequence
+REMOVE StudyDescription
+REMOVE StudyStatusID
+REMOVE SynchronizationFrameOfReferenceUID
+REMOVE TimezoneOffsetFromUTC
+REMOVE contains:Trial
+REMOVE startswith:IssueDate
+REMOVE startswith:PatientTelephoneNumber
+REMOVE InterpretationDiagnosisDescription
+
+
+REMOVE StudyID
+REMOVE BurnedInAnnotation
+REMOVE PerformedProcedureStepStartDate
+REMOVE PatientName
+REMOVE SeriesDescription
+
+REMOVE ContentTime
+REMOVE StudyTime
+REMOVE ContentDate
+REMOVE InstanceCreationDate
+REMOVE SeriesDate
+REMOVE ContentDate
+REMOVE AcquisitionDateTime
+REMOVE AcquisitionDatetime

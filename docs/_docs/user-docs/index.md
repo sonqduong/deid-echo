@@ -5,8 +5,7 @@ permalink: /user-docs/index.html
 order: 1
 ---
 
-Along with the [getting started]({{ site.baseurl }}/getting-started/) guides,
-these pages will help you to use the deid software.
+Along with the getting started guides, these pages help you use deid-echo. The recipes described here are designed and validated only for echocardiogram ultrasound DICOM studies. For high-throughput workflows, see the parallel runner scripts in deidecho_run/.
 
 ## Recipes
 
@@ -18,7 +17,6 @@ these pages will help you to use the deid software.
 ## Client
 
  - [Client]({{ site.baseurl }}/user-docs/client): A command line client for basic cleaning.
-
 
 ## Tools
 
