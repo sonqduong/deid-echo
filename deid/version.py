@@ -14,6 +14,8 @@ LICENSE = "LICENSE"
 INSTALL_REQUIRES = (
     "matplotlib",
     "numpy>=1.20",
-    "pydicom>=3.0.0,<4.0.0",
+    "pydicom=3.0.1",
     "python-dateutil",
+    "pandas",
+    "gdcm",
 )

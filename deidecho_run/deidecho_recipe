@@ -2,7 +2,7 @@ FORMAT dicom
 
 %filter test
 
-LABEL Start with 0s
+LABEL Son Duong Start with 0s
   present SequenceOfUltrasoundRegions
   coordinates all
 
@@ -12,7 +12,7 @@ LABEL Keep Ultrasound Regions
   keepcoordinates from:SequenceOfUltrasoundRegions
 
 %header
-# Note if using contains function it superscedes remove function so best not to use contains for replace 
+# Note if using contains function it superscedes remove function so best not to use contains for replace
 REPLACE PatientID deid_func:id_hash
 
 REPLACE SOPInstanceUID deid_func:pydicom_uuid_salt
