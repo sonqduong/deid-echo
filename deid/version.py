@@ -17,5 +17,9 @@ INSTALL_REQUIRES = (
     "pydicom==3.0.1",
     "python-dateutil",
     "pandas",
-    "gdcm",
+    "pyjpegls==1.5.1",
+    "pylibjpeg==2.1.0",
+    "pylibjpeg-libjpeg==2.3.0",
+    "pylibjpeg-openjpeg==2.5.0",
+    "pylibjpeg-rle==2.2.0"
 )
