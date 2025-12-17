@@ -2,7 +2,7 @@ __author__ = "Vanessa Sochat, Son Duong"
 __copyright__ = "Copyright 2016-2025, Vanessa Sochat"
 __license__ = "MIT"
 
-__version__ = "0.4.7 when forked from deid"
+__version__ = "0.4.7"
 AUTHOR = "Vanessa Sochat, Son Duong"
 AUTHOR_EMAIL = "vsoch@users.noreply.github.com"
 NAME = "deid-echo"
