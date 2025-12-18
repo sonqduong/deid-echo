@@ -40,13 +40,12 @@ TRAITS = [
     ("SOPClassUID", "SOPClassUID"),
     ("InstanceNumber", "InstanceNumber"),
     ("SeriesNumber", "SeriesNumber"),
-    ("Modality", "Modality"),
 ]
 
 FINAL_COLUMNS = [
     "input_root",
     "src_path",
-    "SECRET_SALT_before",
+    "secret_salt",
     "TransferSyntaxUID_before",
     "PhotometricInterpretation_before",
     "PlanarConfiguration_before",
@@ -61,15 +60,15 @@ FINAL_COLUMNS = [
     "has_sequence_of_ultrasound_regions",
     "region_spatial_formats",
     "region_spatial_formats_allowed",
+    "Manufacturer",
+    "ManufacturersModelName",
+    "SoftwareVersions",
     # --- AFTER values  ---
     "PatientID",
     "StudyDate",
     "StudyInstanceUID",
     "SeriesInstanceUID",
     "SOPInstanceUID",
-    "SOPClassUID",
-    "InstanceNumber",
-    "SeriesNumber",
     "Modality",
     "header_path",
     "header_success",
@@ -77,7 +76,6 @@ FINAL_COLUMNS = [
     "patient_dir",
     "series_dir",
     "instance_filename",
-    "size_before_pixel",
     "pixel_path",
     "pixel_success",
     "size_after_pixel",
@@ -117,6 +115,16 @@ def process_one(
         "src_path": str(dcm_path),
         "status": "",
         "error": "",
+        "header_path": "",
+        "header_success": False,
+        "size_after_header": "",
+        "patient_dir": "",
+        "series_dir": "",
+        "instance_filename": "",
+        "pixel_path": "",
+        "pixel_success": False,
+        "size_after_pixel": "",
+        "overwritten": False,
     }
 
     out_csv = worker_log_path(LOG_DIR_, worker_id)
@@ -130,22 +138,21 @@ def process_one(
         append_row_to_worker_csv(row, out_csv, final_columns)
         return row
 
-    # --- BEFORE HEADER (requested BEFORE-only values) ---
-    row["SECRET_SALT_before"] = os.getenv("SECRET_SALT", "")
-
-    # TransferSyntaxUID lives on file_meta in pydicom
-    ts_uid = ""
-    try:
-        if getattr(ds, "file_meta", None) is not None:
-            ts_uid = str(getattr(ds.file_meta, "TransferSyntaxUID", "") or "")
-    except Exception:
-        ts_uid = ""
-    row["TransferSyntaxUID_before"] = ts_uid
-
+    # --- BEFORE HEADER values ---
+    row["secret_salt"] = os.getenv("SECRET_SALT", "")
+    row["TransferSyntaxUID_before"] = safe_getattr(
+        getattr(ds, "file_meta", None),
+        "TransferSyntaxUID",
+        "",
+    )
     row["PhotometricInterpretation_before"] = safe_getattr(
         ds, "PhotometricInterpretation", ""
     )
     row["PlanarConfiguration_before"] = safe_getattr(ds, "PlanarConfiguration", "")
+    row["Manufacturer"] = safe_getattr(ds, "Manufacturer", "")
+    row["ManufacturersModelName"] = safe_getattr(ds, "ManufacturersModelName", "")
+    row["SoftwareVersions"] = safe_getattr(ds, "SoftwareVersions", "")
+    row["Modality"] = safe_getattr(ds, "Modality", "")
 
     # --- BEFORE HEADER (existing traits) ---
     for tag_name, col_name in traits:
@@ -270,9 +277,6 @@ def process_one(
 
     # --- PIXEL PASS ---
     try:
-        size_before_pixel = header_cleaned_path.stat().st_size
-        row["size_before_pixel"] = size_before_pixel
-
         cleaner = DicomCleaner(output_folder=str(out_dir), deid=str(RECIPE_PATH_))
         cleaner.detect(str(header_cleaned_path), mask_above_top=True, buffer_pct=0.01)
         cleaner.clean()
@@ -280,30 +284,52 @@ def process_one(
         pixel_cleaned = cleaner.save_dicom(filename=base_name, jpeg_ls=True)
         pixel_path = Path(pixel_cleaned)
 
-        size_after_pixel = pixel_path.stat().st_size if pixel_path.is_file() else ""
+        pixel_success = bool(pixel_path.is_file())
+        size_after_pixel = pixel_path.stat().st_size if pixel_success else ""
 
         overwritten = (
-            pixel_path.is_file()
-            and pixel_path.resolve() == header_cleaned_path.resolve()
-            and str(size_after_pixel) != str(size_before_pixel)
+            pixel_success and pixel_path.resolve() == header_cleaned_path.resolve()
         )
+
+        # NEW: if header_success True but pixel_success False, delete file at pixel_path
+        if row.get("header_success") is True and pixel_success is False:
+            try:
+                if pixel_path.exists():
+                    pixel_path.unlink()
+            except Exception as cleanup_err:
+                row["error"] = (
+                    row.get("error") or ""
+                ) + f" | cleanup_error={cleanup_err!r}"
 
         row.update(
             {
-                "pixel_path": str(pixel_path),
-                "pixel_success": bool(pixel_path.is_file()),
+                "pixel_path": str(pixel_path) if pixel_success else "",
+                "pixel_success": pixel_success,
                 "size_after_pixel": size_after_pixel,
                 "overwritten": bool(overwritten),
-                "status": "success" if overwritten else "pixel_written_but_size_same",
+                "status": "success" if overwritten else "pixel_fail",
             }
         )
+
     except Exception as e:
+        # pixel step crashed; try to delete any partial pixel file if it exists
+        try:
+            # if cleaner returned a path before crashing, remove it
+            if "pixel_cleaned" in locals() and pixel_cleaned:
+                p = Path(pixel_cleaned)
+                if p.exists():
+                    p.unlink()
+        except Exception:
+            pass
+
         row.update(
             {
                 "status": "pixel_fail",
                 "error": repr(e),
                 "pixel_success": False,
                 "overwritten": False,
+                "pixel_path": "",
+                "size_after_pixel": "",
             }
         )
 
@@ -359,10 +385,8 @@ def main() -> None:
 
     # ---------------- ENV ----------------
     if args.salt:
-        # CLI takes precedence
         os.environ["SECRET_SALT"] = args.salt
     elif os.getenv("SECRET_SALT"):
-        # Use existing environment variable
         pass
     else:
         raise RuntimeError(

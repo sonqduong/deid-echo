@@ -211,3 +211,19 @@ REMOVE SeriesDate
 REMOVE ContentDate
 REMOVE AcquisitionDateTime
 REMOVE AcquisitionDatetime
+REMOVE AcquisitionDate
+REMOVE AcquisitionTime
+REMOVE EthnicGroup
+REMOVE PatientIdentityRemoved
+REMOVE StudyPriorityID
+REMOVE AdditionalPatientHistory
+REMOVE ScheduledProcedureStepDescription
+REMOVE ScheduledProcedureStepID
+REMOVE SmokingStatus
+REMOVE SpecialNeeds
+
+REMOVE StudyArrivalDate
+REMOVE StudyArrivalTime
+REMOVE StudyComments
+REMOVE StudyCompletionDate
+REMOVE StudyCompletionTime
