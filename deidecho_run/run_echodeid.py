@@ -46,6 +46,10 @@ TRAITS = [
 FINAL_COLUMNS = [
     "input_root",
     "src_path",
+    "SECRET_SALT_before",
+    "TransferSyntaxUID_before",
+    "PhotometricInterpretation_before",
+    "PlanarConfiguration_before",
     "PatientID_before",
     "StudyDate_before",
     "StudyTime_before",
@@ -57,6 +61,7 @@ FINAL_COLUMNS = [
     "has_sequence_of_ultrasound_regions",
     "region_spatial_formats",
     "region_spatial_formats_allowed",
+    # --- AFTER values  ---
     "PatientID",
     "StudyDate",
     "StudyInstanceUID",
@@ -125,7 +130,24 @@ def process_one(
         append_row_to_worker_csv(row, out_csv, final_columns)
         return row
 
-    # --- BEFORE HEADER ---
+    # --- BEFORE HEADER (requested BEFORE-only values) ---
+    row["SECRET_SALT_before"] = os.getenv("SECRET_SALT", "")
+
+    # TransferSyntaxUID lives on file_meta in pydicom
+    ts_uid = ""
+    try:
+        if getattr(ds, "file_meta", None) is not None:
+            ts_uid = str(getattr(ds.file_meta, "TransferSyntaxUID", "") or "")
+    except Exception:
+        ts_uid = ""
+    row["TransferSyntaxUID_before"] = ts_uid
+
+    row["PhotometricInterpretation_before"] = safe_getattr(
+        ds, "PhotometricInterpretation", ""
+    )
+    row["PlanarConfiguration_before"] = safe_getattr(ds, "PlanarConfiguration", "")
+
+    # --- BEFORE HEADER (existing traits) ---
     for tag_name, col_name in traits:
         row[f"{col_name}_before"] = safe_getattr(ds, tag_name, "")
 
@@ -186,7 +208,7 @@ def process_one(
         parser.parse(remove_private=True)
         ds_after = parser.dicom
 
-        # AFTER header values
+        # AFTER header values (existing traits only)
         for tag_name, col_name in traits:
             row[col_name] = safe_getattr(ds_after, tag_name, "")
 
