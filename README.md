@@ -33,10 +33,10 @@ echocardiography workflows:
 
 `deid-echo` must be installed from source (either from a local clone or directly from GitHub).
 
-### Create an environment
+### Create an environment (also with dcmtk)
 
 ```bash
-conda create -n deid-echo python=3.10
+conda create -n deid-echo python=3.10 -c conda-forge dcmtk
 conda activate deid-echo
 ```
 
