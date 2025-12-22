@@ -12,7 +12,7 @@ from typing import Optional
 import matplotlib
 import numpy
 from numpy.typing import NDArray
-from pydicom.pixel_data_handlers.util import get_expected_length
+from pydicom.pixel_data_handlers.util import apply_color_lut, get_expected_length
 from pydicom.uid import UID, ExplicitVRLittleEndian
 
 from deid.config import DeidRecipe
@@ -216,6 +216,9 @@ class DicomCleaner:
         dicom_name = self._get_clean_name(output_folder, "dcm", filename=filename)
         dicom = utils.dcmread(self.dicom_file, force=True)
 
+        # ---- capture original PI before any modifications ----
+        orig_pi = str(getattr(dicom, "PhotometricInterpretation", "") or "")
+
         # Log current pixel/meta
         try:
             shape = getattr(self, image_type).shape
@@ -246,9 +249,50 @@ class DicomCleaner:
             dicom.SamplesPerPixel = 3
             dicom.PhotometricInterpretation = "RGB"
             dicom.PlanarConfiguration = 0  # interleaved by pixel
-        elif arr.ndim in (2, 3):  # grayscale image or grayscale cine
+
+            # ---- NEW: If the source used a palette LUT, remove it now that we are true RGB ----
+            palette_tags = [
+                "RedPaletteColorLookupTableDescriptor",
+                "GreenPaletteColorLookupTableDescriptor",
+                "BluePaletteColorLookupTableDescriptor",
+                "RedPaletteColorLookupTableData",
+                "GreenPaletteColorLookupTableData",
+                "BluePaletteColorLookupTableData",
+                "SegmentedRedPaletteColorLookupTableData",
+                "SegmentedGreenPaletteColorLookupTableData",
+                "SegmentedBluePaletteColorLookupTableData",
+                "PaletteColorLookupTableUID",
+            ]
+            for name in palette_tags:
+                if name in dicom:
+                    del dicom[name]
+
+            # ---- NEW (optional but recommended): align bit-depth fields to dtype ----
+            try:
+                if numpy.issubdtype(arr.dtype, numpy.integer):
+                    bits = int(arr.dtype.itemsize * 8)
+                    dicom.BitsAllocated = bits
+                    dicom.BitsStored = bits
+                    dicom.HighBit = bits - 1
+                    dicom.PixelRepresentation = (
+                        1 if numpy.issubdtype(arr.dtype, numpy.signedinteger) else 0
+                    )
+            except Exception:
+                pass
+
+        elif arr.ndim in (
+            2,
+            3,
+        ):  # grayscale image or grayscale cine (or palette indices if not converted)
             dicom.SamplesPerPixel = 1
-            dicom.PhotometricInterpretation = "MONOCHROME2"
+
+            # If source was PALETTE COLOR but we still have 2D/3D indexed data,
+            # DO NOT relabel as MONOCHROME2 (that destroys meaning).
+            if orig_pi == "PALETTE COLOR":
+                dicom.PhotometricInterpretation = "PALETTE COLOR"
+            else:
+                dicom.PhotometricInterpretation = "MONOCHROME2"
+
             if "PlanarConfiguration" in dicom:
                 del dicom.PlanarConfiguration
 
@@ -330,6 +374,48 @@ def clean_pixel_data(
     else:
         original = dicom.pixel_array
 
+    # ---- local PI/SPP (do not rely on header after conversions) ----
+    spp = int(getattr(dicom, "SamplesPerPixel", 1) or 1)
+    pi = str(getattr(dicom, "PhotometricInterpretation", "") or "")
+
+    # ---- PALETTE COLOR -> RGB (before masking) ----
+    if fix_interpretation and pi == "PALETTE COLOR":
+        try:
+            # If already RGB-like, do nothing (but update local spp)
+            if (
+                isinstance(original, numpy.ndarray)
+                and original.ndim >= 3
+                and original.shape[-1] == 3
+            ):
+                spp = 3
+            else:
+                # Single-frame indexed: (rows, cols) -> (rows, cols, 3)
+                if isinstance(original, numpy.ndarray) and original.ndim == 2:
+                    original = apply_color_lut(original, dicom)
+                    spp = 3
+
+                # Multi-frame indexed cine: (frames, rows, cols) -> (frames, rows, cols, 3)
+                elif (
+                    isinstance(original, numpy.ndarray)
+                    and original.ndim == 3
+                    and spp == 1
+                ):
+                    rgb_frames = [
+                        apply_color_lut(original[f], dicom)
+                        for f in range(original.shape[0])
+                    ]
+                    original = numpy.stack(rgb_frames, axis=0)
+                    spp = 3
+                else:
+                    bot.warning(
+                        f"PALETTE COLOR unexpected pixel_array shape={getattr(original,'shape',None)}; proceeding without LUT."
+                    )
+            bot.warning("Converted PALETTE COLOR -> RGB for masking.")
+        except Exception as e:
+            bot.warning(
+                f"Failed PALETTE COLOR -> RGB conversion; proceeding without LUT. err={e!r}"
+            )
+
     # Compile coordinates from result, generate list of tuples with coordinate and value
     # keepcoordinates == 1 (included in mask) and coordinates == 0 (remove).
     coordinates = []
@@ -348,7 +434,7 @@ def clean_pixel_data(
                 if new_coordinate.lower() == "all":
                     # 2D - Greyscale Image - Shape = (X, Y) OR 3D - RGB Image - Shape = (X, Y, Channel)
                     if len(original.shape) == 2 or (
-                        len(original.shape) == 3 and dicom.SamplesPerPixel == 3
+                        len(original.shape) == 3 and spp == 3
                     ):
                         # minr, minc, maxr, maxc = [0, 0, Y, X]
                         new_coordinate = [
@@ -360,7 +446,7 @@ def clean_pixel_data(
 
                     # 4D - RGB Cine Clip - Shape = (frames, X, Y, channel) OR 3D - Greyscale Cine Clip - Shape = (frames, X, Y)
                     if len(original.shape) == 4 or (
-                        len(original.shape) == 3 and dicom.SamplesPerPixel == 1
+                        len(original.shape) == 3 and spp == 1
                     ):
                         new_coordinate = [
                             0,
@@ -370,15 +456,11 @@ def clean_pixel_data(
                         ]
                 else:
                     new_coordinate = [int(x) for x in new_coordinate.split(",")]
-                coordinates.append(
-                    (mask_value, new_coordinate)
-                )  # [(1, [1,2,3,4]),...(0, [1,2,3,4])]
+                coordinates.append((mask_value, new_coordinate))
 
     # Instead of writing directly to data, create a mask of 1s (start keeping all)
     # For 4D RGB Cine - (frames, X, Y, channel) or 3D Greyscale Cine - (frames, X, Y)
-    if len(original.shape) == 4 or (
-        len(original.shape) == 3 and dicom.SamplesPerPixel == 1
-    ):
+    if len(original.shape) == 4 or (len(original.shape) == 3 and spp == 1):
         mask = numpy.ones(original.shape[1:3], dtype=numpy.uint8)
     # For 2D Greyscale image (X, Y) or 3D RGB Image (X, Y channel)
     else:
@@ -410,7 +492,7 @@ def clean_pixel_data(
     elif len(original.shape) == 3:
         # This condition is ambiguous.  If the image shape is 3, we may have a single frame RGB image: size (X, Y, channel)
         # or a multiframe greyscale image: size (frames, X, Y).  Interrogate the SamplesPerPixel field.
-        if dicom.SamplesPerPixel == 3:
+        if spp == 3:
             # RGB Image
             # Convert (X, Y) -> (X, Y, channel)
             final_mask = numpy.transpose(
