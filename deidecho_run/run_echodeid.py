@@ -63,7 +63,7 @@ FINAL_COLUMNS = [
     "region_spatial_formats",
     "region_spatial_formats_allowed",
     "Manufacturer",
-    "ManufacturersModelName",
+    "ManufacturerModelName",
     "SoftwareVersions",
     # --- AFTER values  ---
     "PatientID",
@@ -209,7 +209,7 @@ def process_one(
     )
     row["PlanarConfiguration_before"] = safe_getattr(ds, "PlanarConfiguration", "")
     row["Manufacturer"] = safe_getattr(ds, "Manufacturer", "")
-    row["ManufacturersModelName"] = safe_getattr(ds, "ManufacturersModelName", "")
+    row["ManufacturerModelName"] = safe_getattr(ds, "ManufacturerModelName", "")
     row["SoftwareVersions"] = safe_getattr(ds, "SoftwareVersions", "")
     row["Modality"] = safe_getattr(ds, "Modality", "")
 
