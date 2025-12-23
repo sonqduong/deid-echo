@@ -456,6 +456,13 @@ def clean_pixel_data(
                     new_coordinate = [int(x) for x in new_coordinate.split(",")]
                 coordinates.append((mask_value, new_coordinate))
 
+    # ---------------- Make sure there are coordinates ----------------
+    if results.get("flagged") and not coordinates:
+        raise RuntimeError(
+            "Pixel cleaning aborted: detect() flagged file but no valid masking "
+            "coordinates were produced after filtering."
+        )
+
     # Instead of writing directly to data, create a mask of 1s (start keeping all)
     # For 4D RGB Cine - (frames, X, Y, channel) or 3D Greyscale Cine - (frames, X, Y)
     if len(original.shape) == 4 or (len(original.shape) == 3 and spp == 1):

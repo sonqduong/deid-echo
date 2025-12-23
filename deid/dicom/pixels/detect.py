@@ -340,6 +340,51 @@ def extract_coordinates(
                 "RegionLocationMaxY1",
             )
         )
+        if not have_all:
+            bot.debug(f"[detect] region#{i} missing location tags; skipping")
+            continue
+
+        # --- NEW: read coords ---
+        try:
+            xmin = int(region.RegionLocationMinX0)
+            ymin = int(region.RegionLocationMinY0)
+            xmax = int(region.RegionLocationMaxX1)
+            ymax = int(region.RegionLocationMaxY1)
+        except Exception as e:
+            bot.debug(f"[detect] region#{i} could not parse coords: {e!r}; skipping")
+            continue
+
+        # --- NEW: clip to image bounds (defensive) ---
+        if width > 0 and height > 0:
+            xmin = max(0, min(xmin, width - 1))
+            xmax = max(0, min(xmax, width - 1))
+            ymin = max(0, min(ymin, height - 1))
+            ymax = max(0, min(ymax, height - 1))
+
+        # --- NEW: validity checks ---
+        # Require positive-area box
+        if xmax <= xmin or ymax <= ymin:
+            bot.debug(
+                f"[detect] region#{i} skip degenerate box [{xmin},{ymin},{xmax},{ymax}]"
+            )
+            continue
+
+        # Require minimum size (>=10px each dimension)
+        box_w = xmax - xmin
+        box_h = ymax - ymin
+        if box_w < 10 or box_h < 10:
+            bot.debug(
+                f"[detect] region#{i} skip small box [{xmin},{ymin},{xmax},{ymax}] "
+                f"(w={box_w}, h={box_h})"
+            )
+            continue
+
+        region_boxes.append((xmin, ymin, xmax, ymax))
+        bot.debug(
+            f"[detect] region#{i} add box [{xmin},{ymin},{xmax},{ymax}] "
+            f"(w={box_w}, h={box_h}, rsf={rsf_i}, rdt={rdt_i})"
+        )
+
         if have_all:
             xmin = int(region.RegionLocationMinX0)
             ymin = int(region.RegionLocationMinY0)
