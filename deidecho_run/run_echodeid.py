@@ -1,6 +1,8 @@
 import argparse
 import os
 import random
+import shutil
+import subprocess
 import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -72,6 +74,8 @@ FINAL_COLUMNS = [
     "Modality",
     "header_path",
     "header_success",
+    "dcmtk_rewrite_attempted",
+    "dcmtk_rewrite_success",
     "size_after_header",
     "patient_dir",
     "series_dir",
@@ -87,6 +91,59 @@ FINAL_COLUMNS = [
 
 def worker_log_path(log_dir: Path, worker_id: int) -> Path:
     return log_dir / f"deid_header_pixel_log__worker_{worker_id:03d}.csv"
+
+
+def dcmtk_decode_overwrite_inplace(dcm_path: Path) -> (bool, str):
+    """
+    Use DCMTK dcmdjpeg to decode JPEG Lossless -> Explicit VR Little Endian,
+    writing to a temp file and atomically overwriting the original.
+    Returns: (success, error_message)
+    """
+    dcmdjpeg = shutil.which("dcmdjpeg")
+    if not dcmdjpeg:
+        return (
+            False,
+            "dcmdjpeg not found on PATH (dcmtk not installed / env not active)",
+        )
+
+    tmp_path = dcm_path.with_suffix(dcm_path.suffix + ".dcmtk_tmp")
+
+    cmd = [
+        dcmdjpeg,
+        "--write-xfer-little",  # Explicit VR Little Endian
+        str(dcm_path),
+        str(tmp_path),
+    ]
+
+    res = subprocess.run(cmd, capture_output=True, text=True)
+
+    if res.returncode != 0 or not tmp_path.exists():
+        stderr = (res.stderr or "").strip()
+        stdout = (res.stdout or "").strip()
+        msg = f"dcmdjpeg failed rc={res.returncode}"
+        if stderr:
+            msg += f" | stderr={stderr[:800]}"
+        elif stdout:
+            msg += f" | stdout={stdout[:800]}"
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        return False, msg
+
+    # Atomically overwrite original
+    try:
+        os.replace(str(tmp_path), str(dcm_path))
+    except Exception as e:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        return False, f"os.replace failed: {e!r}"
+
+    return True, ""
 
 
 def process_one(
@@ -125,6 +182,8 @@ def process_one(
         "pixel_success": False,
         "size_after_pixel": "",
         "overwritten": False,
+        "dcmtk_rewrite_success": False,
+        "dcmtk_rewrite_attempted": False,
     }
 
     out_csv = worker_log_path(LOG_DIR_, worker_id)
@@ -275,6 +334,82 @@ def process_one(
         append_row_to_worker_csv(row, out_csv, final_columns)
         return row
 
+    # --- DEAL WITH ZONARE PROBLEM: USE DCMTK DECODE/REWRITE (AFTER HEADER, BEFORE PIXELS) ---
+    try:
+        manu = str(row.get("Manufacturer", "") or "").strip().upper()
+        tsuid = str(row.get("TransferSyntaxUID_before", "") or "").strip()
+        pc_raw = row.get("PlanarConfiguration_before", "")
+
+        # PlanarConfiguration can be int/float/str depending on read path
+        pc_val = None
+        try:
+            pc_val = float(pc_raw) if pc_raw != "" else None
+        except Exception:
+            pc_val = None
+
+        needs_dcmtk = (
+            manu == "ZONARE"
+            and tsuid == "1.2.840.10008.1.2.4.70"
+            and (pc_val == 1.0)  # accept 1 / 1.0
+        )
+
+        if needs_dcmtk:
+            row["dcmtk_rewrite_attempted"] = True
+            ok, err = dcmtk_decode_overwrite_inplace(header_cleaned_path)
+            row["dcmtk_rewrite_success"] = bool(ok)
+
+            if not ok:
+                # DELETE the header-pass file if DCMTK fails
+                try:
+                    if header_cleaned_path.exists():
+                        header_cleaned_path.unlink()
+                        row["header_path"] = ""
+                        row["size_after_header"] = ""
+                except Exception as cleanup_err:
+                    row["error"] = (
+                        row.get("error") or ""
+                    ) + f" | header_cleanup_error={cleanup_err!r}"
+
+                row.update(
+                    {
+                        "status": "dcmtk_fail",
+                        "error": (row.get("error") or "") + f" | {err}",
+                        "pixel_success": False,
+                        "overwritten": False,
+                        "pixel_path": "",
+                        "size_after_pixel": "",
+                    }
+                )
+                append_row_to_worker_csv(row, out_csv, final_columns)
+                return row
+
+    except Exception as e:
+        # If the decision logic itself crashes, treat as dcmtk fail (safe)
+        # DELETE the header-pass file as well (best-effort)
+        try:
+            if "header_cleaned_path" in locals() and header_cleaned_path.exists():
+                header_cleaned_path.unlink()
+                row["header_path"] = ""
+                row["size_after_header"] = ""
+        except Exception as cleanup_err:
+            row["error"] = (
+                row.get("error") or ""
+            ) + f" | header_cleanup_error={cleanup_err!r}"
+
+        row.update(
+            {
+                "status": "dcmtk_fail",
+                "error": (row.get("error") or "") + f" | dcmtk_logic_error={e!r}",
+                "dcmtk_rewrite_success": False,
+                "pixel_success": False,
+                "overwritten": False,
+                "pixel_path": "",
+                "size_after_pixel": "",
+            }
+        )
+        append_row_to_worker_csv(row, out_csv, final_columns)
+        return row
+
     # --- PIXEL PASS ---
     try:
         cleaner = DicomCleaner(output_folder=str(out_dir), deid=str(RECIPE_PATH_))
@@ -291,36 +426,68 @@ def process_one(
             pixel_success and pixel_path.resolve() == header_cleaned_path.resolve()
         )
 
-        # NEW: if header_success True but pixel_success False, delete file at pixel_path
-        if row.get("header_success") is True and pixel_success is False:
+        if not pixel_success or not overwritten:
+            # FAILURE: delete EVERYTHING
             try:
                 if pixel_path.exists():
                     pixel_path.unlink()
+            except Exception:
+                pass
+
+            try:
+                if header_cleaned_path.exists():
+                    header_cleaned_path.unlink()
+                    row["header_path"] = ""
+                    row["size_after_header"] = ""
             except Exception as cleanup_err:
                 row["error"] = (
                     row.get("error") or ""
-                ) + f" | cleanup_error={cleanup_err!r}"
+                ) + f" | header_cleanup_error={cleanup_err!r}"
 
+            row.update(
+                {
+                    "status": "pixel_fail",
+                    "pixel_success": False,
+                    "overwritten": False,
+                    "pixel_path": "",
+                    "size_after_pixel": "",
+                }
+            )
+            append_row_to_worker_csv(row, out_csv, final_columns)
+            return row
+
+        # SUCCESS
         row.update(
             {
-                "pixel_path": str(pixel_path) if pixel_success else "",
-                "pixel_success": pixel_success,
+                "pixel_path": str(pixel_path),
+                "pixel_success": True,
                 "size_after_pixel": size_after_pixel,
-                "overwritten": bool(overwritten),
-                "status": "success" if overwritten else "pixel_fail",
+                "overwritten": True,
+                "status": "success",
             }
         )
+        append_row_to_worker_csv(row, out_csv, final_columns)
+        return row
 
     except Exception as e:
-        # pixel step crashed; try to delete any partial pixel file if it exists
+        # Pixel crash: delete EVERYTHING
         try:
-            # if cleaner returned a path before crashing, remove it
             if "pixel_cleaned" in locals() and pixel_cleaned:
                 p = Path(pixel_cleaned)
                 if p.exists():
                     p.unlink()
         except Exception:
             pass
+
+        try:
+            if header_cleaned_path.exists():
+                header_cleaned_path.unlink()
+                row["header_path"] = ""
+                row["size_after_header"] = ""
+        except Exception as cleanup_err:
+            row["error"] = (
+                row.get("error") or ""
+            ) + f" | header_cleanup_error={cleanup_err!r}"
 
         row.update(
             {
@@ -332,9 +499,8 @@ def process_one(
                 "size_after_pixel": "",
             }
         )
-
-    append_row_to_worker_csv(row, out_csv, final_columns)
-    return row
+        append_row_to_worker_csv(row, out_csv, final_columns)
+        return row
 
 
 def parse_args() -> argparse.Namespace:
@@ -410,6 +576,15 @@ def main() -> None:
     if not INPUT_ROOT.is_dir():
         raise NotADirectoryError(
             f"Input root does not exist or is not a directory: {INPUT_ROOT}"
+        )
+
+    # FOR SAFETY: never write outputs inside inputs (prevents overlap surprises)
+    in_root = INPUT_ROOT.resolve()
+    out_root = OUTPUT_ROOT.resolve()
+    if str(out_root).startswith(str(in_root) + os.sep):
+        raise RuntimeError(
+            f"OUTPUT_ROOT should not be inside INPUT_ROOT. "
+            f"INPUT_ROOT={in_root} OUTPUT_ROOT={out_root}"
         )
 
     # ---------------- DISCOVER FILES ----------------

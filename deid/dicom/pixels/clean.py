@@ -243,14 +243,15 @@ class DicomCleaner:
         # Replace PixelData
         dicom.PixelData = getattr(self, image_type).tobytes()
 
-        # Harmonize color metadata if pixel data is 3-channel interleaved
         arr = getattr(self, image_type)
+
+        # Harmonize color/grayscale metadata
         if arr.ndim in (3, 4) and (arr.shape[-1] == 3):  # RGB image or RGB cine
             dicom.SamplesPerPixel = 3
             dicom.PhotometricInterpretation = "RGB"
             dicom.PlanarConfiguration = 0  # interleaved by pixel
 
-            # ---- NEW: If the source used a palette LUT, remove it now that we are true RGB ----
+            # If the source used a palette LUT, remove it now that we are true RGB
             palette_tags = [
                 "RedPaletteColorLookupTableDescriptor",
                 "GreenPaletteColorLookupTableDescriptor",
@@ -267,19 +268,6 @@ class DicomCleaner:
                 if name in dicom:
                     del dicom[name]
 
-            # ---- NEW (optional but recommended): align bit-depth fields to dtype ----
-            try:
-                if numpy.issubdtype(arr.dtype, numpy.integer):
-                    bits = int(arr.dtype.itemsize * 8)
-                    dicom.BitsAllocated = bits
-                    dicom.BitsStored = bits
-                    dicom.HighBit = bits - 1
-                    dicom.PixelRepresentation = (
-                        1 if numpy.issubdtype(arr.dtype, numpy.signedinteger) else 0
-                    )
-            except Exception:
-                pass
-
         elif arr.ndim in (
             2,
             3,
@@ -295,6 +283,16 @@ class DicomCleaner:
 
             if "PlanarConfiguration" in dicom:
                 del dicom.PlanarConfiguration
+
+        # Align bit-depth fields to dtype (applies to RGB and grayscale)
+        if numpy.issubdtype(arr.dtype, numpy.integer):
+            bits = int(arr.dtype.itemsize * 8)  # uint8 -> 8, uint16 -> 16
+            dicom.BitsAllocated = bits
+            dicom.BitsStored = bits
+            dicom.HighBit = bits - 1
+            dicom.PixelRepresentation = (
+                1 if numpy.issubdtype(arr.dtype, numpy.signedinteger) else 0
+            )
 
         # JPEG-LS branch or uncompressed fallback
         if jpeg_ls:
