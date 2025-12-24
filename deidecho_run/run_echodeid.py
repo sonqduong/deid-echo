@@ -80,6 +80,7 @@ FINAL_COLUMNS = [
     "dcmtk_rewrite_success",
     "size_after_header",
     "patient_dir",
+    "study_dir",
     "series_dir",
     "instance_filename",
     "pixel_path",
@@ -233,6 +234,7 @@ def process_one(
         "header_success": False,
         "size_after_header": "",
         "patient_dir": "",
+        "study_dir": "",
         "series_dir": "",
         "instance_filename": "",
         "pixel_path": "",
@@ -336,6 +338,9 @@ def process_one(
             row[col_name] = safe_getattr(ds_after, tag_name, "")
 
         hashed_patient_id = sanitize_for_path(row.get("PatientID", ""), "NO_PATIENTID")
+        hashed_study_uid = sanitize_for_path(
+            row.get("StudyInstanceUID", ""), "NO_STUDYUID"
+        )
 
         series_num_int = as_int_or_none(row.get("SeriesNumber", ""))
         inst_num_int = as_int_or_none(row.get("InstanceNumber", ""))
@@ -349,6 +354,8 @@ def process_one(
         suffix = uuid.uuid4().hex[:8]
         if hashed_patient_id == "NO_PATIENTID":
             hashed_patient_id = f"{hashed_patient_id}_{suffix}"
+        if hashed_study_uid == "NO_STUDYUID":
+            hashed_study_uid = f"{hashed_study_uid}_{suffix}"
         if series_uid == "NO_SERIESUID":
             series_uid = f"{series_uid}_{suffix}"
         if sop_instance_uid == "NO_SOPINSTANCEUID":
@@ -359,7 +366,7 @@ def process_one(
             fmt5(inst_num_int) if inst_num_int is not None else sop_instance_uid
         )
 
-        out_dir = OUTPUT_ROOT_ / hashed_patient_id / series_part
+        out_dir = OUTPUT_ROOT_ / hashed_patient_id / hashed_study_uid / series_part
         out_dir.mkdir(parents=True, exist_ok=True)
 
         base_name = f"{instance_part}.dcm"
@@ -373,6 +380,7 @@ def process_one(
                 "header_success": True,
                 "size_after_header": header_cleaned_path.stat().st_size,
                 "patient_dir": hashed_patient_id,
+                "study_dir": hashed_study_uid,
                 "series_dir": series_part,
                 "instance_filename": base_name,
             }
