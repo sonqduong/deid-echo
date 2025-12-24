@@ -93,6 +93,8 @@ FINAL_COLUMNS = [
 # recycle workers every N tasks to limit memory bloat
 MAX_TASKS_PER_CHILD = 500
 
+CHUNKSIZE = 1  # used by Pool.imap_unordered and logged to metrics
+
 
 def worker_log_path(log_dir: Path, worker_id: int) -> Path:
     return log_dir / f"deid_header_pixel_log__worker_{worker_id:03d}.csv"
@@ -125,7 +127,7 @@ def append_metrics_line(
 ) -> None:
     """
     Append one metrics line with timestamp + avg files/sec since run start
-    AND interval files/sec since last flush.
+    AND interval files/sec since last flush, plus elapsed seconds since start.
     """
     now_ts = time.time()
 
@@ -137,9 +139,9 @@ def append_metrics_line(
         interval_completed / elapsed_interval if elapsed_interval > 0 else 0.0
     )
 
-    # Format: timestamp <tab> completed/total <tab> avg_fps <tab> interval_fps
     line = (
         f"{_metrics_ts()}\t{completed}/{total}\t"
+        f"elapsed_s={elapsed_total:.1f}\t"
         f"avg_fps={avg_fps:.3f}\tinterval_fps={interval_fps:.3f}\n"
     )
 
@@ -624,9 +626,7 @@ def main() -> None:
 
     # --- METRICS FILE (ADDED) ---
     METRICS_TXT = OUTPUT_ROOT / "metrics.txt"
-    if not METRICS_TXT.exists():
-        with open(METRICS_TXT, "w", encoding="utf-8") as f:
-            f.write("timestamp\tcompleted/total\tavg_fps\tinterval_fps\n")
+    # (Header is written later, once ctx/worker/chunksize are known.)
 
     if not INPUT_ROOT.is_dir():
         raise NotADirectoryError(
@@ -660,27 +660,66 @@ def main() -> None:
     todo = [str(p) for p in dcm_files if str(p) not in done_src]
     print(f"[INFO] Resume: {len(done_src)} already done; {len(todo)} to process.")
 
+    # ---------------- RUN PARALLEL  ----------------
+    ctx = mp.get_context("fork")  # other option is spawn if unstable
+    tasks = []
+    n_workers = int(args.workers)
+
+    # --- WRITE METRICS HEADER (RUN CONFIG) ---
+    with open(METRICS_TXT, "w", encoding="utf-8") as f:
+        f.write("# deid-echo metrics\n")
+        f.write(f"# start_time: {_metrics_ts()}\n")
+        f.write(f"# workers: {n_workers}\n")
+        f.write(f"# chunksize: {CHUNKSIZE}\n")
+        f.write(f"# multiprocessing_method: {ctx.get_start_method()}\n")
+        f.write(f"# maxtasksperchild: {MAX_TASKS_PER_CHILD}\n")
+        f.write("# -----------------------------------------\n")
+        f.write("timestamp\tcompleted/total\telapsed_s\tavg_fps\tinterval_fps\n")
+
+    # ---- GLOBAL + INTERVAL SPEED TIMING ----
+    run_start_ts = time.time()
+    interval_start_ts = run_start_ts
+    interval_completed = 0
+    completed = 0
+    total_todo = len(todo)
+
+    # Optional: initial baseline line (0 progress)
+    append_metrics_line(
+        METRICS_TXT,
+        completed=0,
+        total=total_todo,
+        run_start_ts=run_start_ts,
+        interval_completed=0,
+        interval_start_ts=interval_start_ts,
+    )
+
     if len(todo) == 0:
         print("[INFO] Nothing to do. Rebuilding master log and exiting.")
         rebuild_master_log(MASTER_LOG_CSV, LOG_DIR, FINAL_COLUMNS)
         print(f"[INFO] Master log written: {MASTER_LOG_CSV}")
 
-        # write a final metrics line even for "nothing to do"
-        now = time.time()
+        end_ts = time.time()
+        total_elapsed = end_ts - run_start_ts
+
+        # final snapshot line
         append_metrics_line(
             METRICS_TXT,
             completed=0,
             total=0,
-            run_start_ts=now,
+            run_start_ts=run_start_ts,
             interval_completed=0,
-            interval_start_ts=now,
+            interval_start_ts=interval_start_ts,
         )
-        raise SystemExit(0)
 
-    # ---------------- RUN PARALLEL  ----------------
-    ctx = mp.get_context("fork")  # other option is spawn if unstable
-    tasks = []
-    n_workers = int(args.workers)
+        # --- METRICS FOOTER (END OF RUN) ---
+        with open(METRICS_TXT, "a", encoding="utf-8") as f:
+            f.write("# -----------------------------------------\n")
+            f.write(f"# end_time: {_metrics_ts()}\n")
+            f.write(f"# total_elapsed_s: {total_elapsed:.1f}\n")
+            f.write("# completed: 0/0\n")
+            f.write("# avg_fps: 0.000\n")
+
+        raise SystemExit(0)
 
     for idx, path_str in enumerate(todo):
         worker_id = idx % n_workers
@@ -699,21 +738,13 @@ def main() -> None:
             )
         )
 
-    # ---- GLOBAL + INTERVAL SPEED TIMING ----
-    run_start_ts = time.time()
-    interval_start_ts = run_start_ts
-    interval_completed = 0
-    completed = 0
-    total_todo = len(todo)
-
     try:
         with ctx.Pool(
             processes=n_workers,
             initializer=_init_worker,
             maxtasksperchild=MAX_TASKS_PER_CHILD,
         ) as pool:
-            # chunksize=1 keeps per-worker memory pressure lower for large cine files, increase for speed
-            for _ in pool.imap_unordered(_process_one_star, tasks, chunksize=1):
+            for _ in pool.imap_unordered(_process_one_star, tasks, chunksize=CHUNKSIZE):
                 completed += 1
                 interval_completed += 1
 
@@ -731,7 +762,6 @@ def main() -> None:
 
                     rebuild_master_log(MASTER_LOG_CSV, LOG_DIR, FINAL_COLUMNS)
 
-                    # write metrics snapshot
                     append_metrics_line(
                         METRICS_TXT,
                         completed=completed,
@@ -746,12 +776,10 @@ def main() -> None:
                         f"| avg={avg_fps:.2f} files/sec | interval={interval_fps:.2f} files/sec"
                     )
 
-                    # reset interval window
                     interval_start_ts = now_ts
                     interval_completed = 0
 
     finally:
-        # ALWAYS write an end snapshot, even if the run errors or is interrupted
         end_ts = time.time()
         total_elapsed = end_ts - run_start_ts
         final_avg_fps = (completed / total_elapsed) if total_elapsed > 0 else 0.0
@@ -763,13 +791,11 @@ def main() -> None:
             else 0.0
         )
 
-        # one last rebuild (best-effort; safe if interrupted)
         try:
             rebuild_master_log(MASTER_LOG_CSV, LOG_DIR, FINAL_COLUMNS)
         except Exception:
             pass
 
-        # guaranteed final metrics line
         append_metrics_line(
             METRICS_TXT,
             completed=completed,
@@ -779,8 +805,17 @@ def main() -> None:
             interval_start_ts=interval_start_ts,
         )
 
+        # --- METRICS FOOTER (END OF RUN) ---
+        with open(METRICS_TXT, "a", encoding="utf-8") as f:
+            f.write("# -----------------------------------------\n")
+            f.write(f"# end_time: {_metrics_ts()}\n")
+            f.write(f"# total_elapsed_s: {total_elapsed:.1f}\n")
+            f.write(f"# completed: {completed}/{total_todo}\n")
+            f.write(f"# avg_fps: {final_avg_fps:.3f}\n")
+
         print(
             f"[INFO] Done: {completed}/{total_todo} "
+            f"| total_time={total_elapsed:.1f}s "
             f"| avg speed={final_avg_fps:.2f} files/sec "
             f"| last interval={last_interval_fps:.2f} files/sec"
         )
