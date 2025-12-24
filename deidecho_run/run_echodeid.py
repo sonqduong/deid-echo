@@ -1,12 +1,12 @@
 import argparse
+import multiprocessing as mp
 import os
 import random
 import shutil
 import subprocess
 import uuid
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 from deid_helpers import (
     append_row_to_worker_csv,
@@ -89,11 +89,26 @@ FINAL_COLUMNS = [
 ]
 
 
+# recycle workers every N tasks to prevent RSS creep
+MAX_TASKS_PER_CHILD = 500
+
+
 def worker_log_path(log_dir: Path, worker_id: int) -> Path:
     return log_dir / f"deid_header_pixel_log__worker_{worker_id:03d}.csv"
 
 
-def dcmtk_decode_overwrite_inplace(dcm_path: Path) -> (bool, str):
+def _init_worker() -> None:
+    """
+    Runs once per worker process (and again when a worker is recycled).
+    Good place to cap hidden thread pools and reduce memory/CPU contention.
+    """
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+
+def dcmtk_decode_overwrite_inplace(dcm_path: Path) -> Tuple[bool, str]:
     """
     Use DCMTK dcmdjpeg to decode JPEG Lossless -> Explicit VR Little Endian,
     writing to a temp file and atomically overwriting the original.
@@ -340,7 +355,6 @@ def process_one(
         tsuid = str(row.get("TransferSyntaxUID_before", "") or "").strip()
         pc_raw = row.get("PlanarConfiguration_before", "")
 
-        # PlanarConfiguration can be int/float/str depending on read path
         pc_val = None
         try:
             pc_val = float(pc_raw) if pc_raw != "" else None
@@ -348,9 +362,7 @@ def process_one(
             pc_val = None
 
         needs_dcmtk = (
-            manu == "ZONARE"
-            and tsuid == "1.2.840.10008.1.2.4.70"
-            and (pc_val == 1.0)  # accept 1 / 1.0
+            manu == "ZONARE" and tsuid == "1.2.840.10008.1.2.4.70" and (pc_val == 1.0)
         )
 
         if needs_dcmtk:
@@ -359,7 +371,6 @@ def process_one(
             row["dcmtk_rewrite_success"] = bool(ok)
 
             if not ok:
-                # DELETE the header-pass file if DCMTK fails
                 try:
                     if header_cleaned_path.exists():
                         header_cleaned_path.unlink()
@@ -384,8 +395,6 @@ def process_one(
                 return row
 
     except Exception as e:
-        # If the decision logic itself crashes, treat as dcmtk fail (safe)
-        # DELETE the header-pass file as well (best-effort)
         try:
             if "header_cleaned_path" in locals() and header_cleaned_path.exists():
                 header_cleaned_path.unlink()
@@ -427,7 +436,6 @@ def process_one(
         )
 
         if not pixel_success or not overwritten:
-            # FAILURE: delete EVERYTHING
             try:
                 if pixel_path.exists():
                     pixel_path.unlink()
@@ -456,7 +464,6 @@ def process_one(
             append_row_to_worker_csv(row, out_csv, final_columns)
             return row
 
-        # SUCCESS
         row.update(
             {
                 "pixel_path": str(pixel_path),
@@ -470,7 +477,6 @@ def process_one(
         return row
 
     except Exception as e:
-        # Pixel crash: delete EVERYTHING
         try:
             if "pixel_cleaned" in locals() and pixel_cleaned:
                 p = Path(pixel_cleaned)
@@ -503,6 +509,13 @@ def process_one(
         return row
 
 
+def _process_one_star(args_tuple):
+    """
+    Helper for multiprocessing.Pool: unpack args and call process_one.
+    """
+    return process_one(*args_tuple)
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="De-identify DICOM headers + clean pixels in parallel."
@@ -522,7 +535,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--recipe-path", required=True, type=Path, help="Path to deid recipe"
     )
-
     ap.add_argument(
         "--salt",
         default=None,
@@ -535,12 +547,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional subsample count for testing (random sample).",
     )
     ap.add_argument(
-        "--workers", type=int, default=100, help="Number of parallel worker processes."
+        "--workers", type=int, default=10, help="Number of parallel worker processes."
     )
     ap.add_argument(
         "--flush-every",
         type=int,
-        default=20,
+        default=500,
         help="Rebuild master log every N completed files.",
     )
     return ap.parse_args()
@@ -561,16 +573,13 @@ def main() -> None:
 
     print("SECRET_SALT set (source):", "CLI" if args.salt else "ENV")
 
-    # ---------------- CONFIG ----------------
     INPUT_ROOT = args.input_root
     OUTPUT_ROOT = args.output_root
     RECIPE_PATH = args.recipe_path
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-
     LOG_DIR = OUTPUT_ROOT / "logs"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-
     MASTER_LOG_CSV = OUTPUT_ROOT / "deid_log.csv"
 
     if not INPUT_ROOT.is_dir():
@@ -578,7 +587,6 @@ def main() -> None:
             f"Input root does not exist or is not a directory: {INPUT_ROOT}"
         )
 
-    # FOR SAFETY: never write outputs inside inputs (prevents overlap surprises)
     in_root = INPUT_ROOT.resolve()
     out_root = OUTPUT_ROOT.resolve()
     if str(out_root).startswith(str(in_root) + os.sep):
@@ -594,7 +602,6 @@ def main() -> None:
         print(f"[NOTE] No files found under {INPUT_ROOT}")
         raise SystemExit(0)
 
-    # Optional subsample
     if args.subsample is not None and args.subsample > 0:
         n = min(args.subsample, total_files)
         dcm_files = random.sample(dcm_files, n)
@@ -613,32 +620,37 @@ def main() -> None:
         print(f"[INFO] Master log written: {MASTER_LOG_CSV}")
         raise SystemExit(0)
 
-    # ---------------- RUN PARALLEL ----------------
-    futures = []
-    with ProcessPoolExecutor(max_workers=int(args.workers)) as ex:
-        for idx, path_str in enumerate(todo):
-            worker_id = idx % int(args.workers)
-            futures.append(
-                ex.submit(
-                    process_one,
-                    path_str,
-                    worker_id,
-                    str(INPUT_ROOT),
-                    str(OUTPUT_ROOT),
-                    str(RECIPE_PATH),
-                    str(LOG_DIR),
-                    ALLOWED_SOP,
-                    ALLOWED_RSF,
-                    TRAITS,
-                    FINAL_COLUMNS,
-                )
+    # ---------------- RUN PARALLEL  ----------------
+    ctx = mp.get_context("fork")  # other option is spawn if unstable
+    tasks = []
+    n_workers = int(args.workers)
+
+    for idx, path_str in enumerate(todo):
+        worker_id = idx % n_workers
+        tasks.append(
+            (
+                path_str,
+                worker_id,
+                str(INPUT_ROOT),
+                str(OUTPUT_ROOT),
+                str(RECIPE_PATH),
+                str(LOG_DIR),
+                ALLOWED_SOP,
+                ALLOWED_RSF,
+                TRAITS,
+                FINAL_COLUMNS,
             )
+        )
 
-        completed = 0
-        for fut in as_completed(futures):
-            _ = fut.result()
+    completed = 0
+    with ctx.Pool(
+        processes=n_workers,
+        initializer=_init_worker,
+        maxtasksperchild=MAX_TASKS_PER_CHILD,
+    ) as pool:
+        # chunksize=1 keeps per-worker memory pressure lower for large cine files, increase for speed
+        for _ in pool.imap_unordered(_process_one_star, tasks, chunksize=1):
             completed += 1
-
             if completed % int(args.flush_every) == 0:
                 rebuild_master_log(MASTER_LOG_CSV, LOG_DIR, FINAL_COLUMNS)
                 print(
