@@ -125,7 +125,7 @@ def _has_burned_pixels_single(
     buffer_pct: float,
 ):
     bot.debug(f"[detect] loading DICOM: {dicom_file}")
-    dicom = utils.load_dicom(dicom_file, force=force)
+    dicom = utils.load_dicom(dicom_file, force=force, stop_before_pixels=True)
     results = []
     global_flagged = False
 

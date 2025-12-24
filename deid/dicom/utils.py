@@ -106,11 +106,14 @@ def save_dicom(dicom, dicom_file, output_folder=None, overwrite=False):
     return output_dicom
 
 
-def load_dicom(dcm_file, force=True):
+def load_dicom(dcm_file, force=True, stop_before_pixels: bool = False):
     if isinstance(dcm_file, FileDataset):
         return dcm_file
-    else:
-        return pydicom.dcmread(dcm_file, force=force)
+    return pydicom.dcmread(
+        dcm_file,
+        force=force,
+        stop_before_pixels=stop_before_pixels,
+    )
 
 
 def dcmread(filename, **kwargs):
