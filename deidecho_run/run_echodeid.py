@@ -94,7 +94,7 @@ FINAL_COLUMNS = [
 # recycle workers every N tasks to limit memory bloat
 MAX_TASKS_PER_CHILD = 500
 
-CHUNKSIZE = 1  # used by Pool.imap_unordered and logged to metrics
+CHUNKSIZE = 1  # Keep at 1, used by Pool.imap_unordered
 
 
 def worker_log_path(log_dir: Path, worker_id: int) -> Path:
