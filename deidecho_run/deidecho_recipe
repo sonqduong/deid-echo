@@ -23,12 +23,15 @@ REPLACE ReferencedSOPInstanceUID deid_func:pydicom_uuid_salt
 
 REPLACE StudyDate deid_func:jitter
 REPLACE PatientBirthDate deid_func:jitter
-
-
+BLANK PatientName
+BLANK PatientsName
+BLANK StudyTime
+BLANK AccessionNumber
+BLANK ReferringPhysicianName
+BLANK ReferringPhysiciansName
+BLANK StudyID
 
 REMOVE ImplementationClassUID
-
-REMOVE AccessionNumber
 REMOVE AcquisitionContextSequence
 REMOVE AdmittingDiagnosesDescription
 REMOVE AdmissionID
@@ -65,7 +68,6 @@ REMOVE GroupOfPatientsIdentificationSequence
 REMOVE HumanPerformerName
 REMOVE IconImageSequence
 REMOVE ImageComments
-REMOVE ImageType
 REMOVE ImplementationVersionName
 REMOVE InstitutionAddress
 REMOVE InstitutionalDepartmentName
@@ -119,7 +121,6 @@ REMOVE PatientInsurancePlanCodeSequence
 REMOVE PatientMotherBirthName
 REMOVE PatientPrimaryLanguageCodeSequence
 REMOVE PatientReligiousPreference
-REMOVE PatientsName
 REMOVE PatientSexNeutered
 REMOVE PatientState
 REMOVE PatientTelecomInformation
@@ -157,7 +158,6 @@ REMOVE ReferencedSeriesSequence
 REMOVE ReferencedStudySequence
 REMOVE ReferringPhysicianAddress
 REMOVE ReferringPhysicianIdentificationSequence
-REMOVE ReferringPhysicianName
 REMOVE ReferringPhysicianTelephoneNumbers
 REMOVE RegionOfResidence
 REMOVE RelatedSeriesSequence
@@ -195,16 +195,10 @@ REMOVE contains:Trial
 REMOVE startswith:IssueDate
 REMOVE startswith:PatientTelephoneNumber
 REMOVE InterpretationDiagnosisDescription
-
-
-REMOVE StudyID
 REMOVE BurnedInAnnotation
 REMOVE PerformedProcedureStepStartDate
-REMOVE PatientName
 REMOVE SeriesDescription
-
 REMOVE ContentTime
-REMOVE StudyTime
 REMOVE ContentDate
 REMOVE InstanceCreationDate
 REMOVE SeriesDate
@@ -221,9 +215,42 @@ REMOVE ScheduledProcedureStepDescription
 REMOVE ScheduledProcedureStepID
 REMOVE SmokingStatus
 REMOVE SpecialNeeds
-
 REMOVE StudyArrivalDate
 REMOVE StudyArrivalTime
 REMOVE StudyComments
 REMOVE StudyCompletionDate
 REMOVE StudyCompletionTime
+REMOVE AcquisitionNumber
+REMOVE PerformedStationAETitle
+REMOVE PerformedProcedureStepStatus
+REMOVE PerformedProcedureStepEndTime
+REMOVE ScheduledStationAETitle
+REMOVE ScheduledProcedureStepStartTime
+REMOVE ScheduledStationName
+REMOVE ScheduledProcedureStepStatus
+REMOVE RequestedProcedureLocation
+REMOVE ImplementationVersionName
+REMOVE ViewNumber
+REMOVE ViewName
+REMOVE BodyPartExamined
+REMOVE StorageMediaFileSetUID
+REMOVE RouteOfAdmissions
+REMOVE TextString
+REMOVE NumberOfEventTimers
+REMOVE EventElapsedTimes
+REMOVE EventTimerNames
+REMOVE DeidentificationMethod
+REMOVE TypeOfPatientID
+REMOVE AdmittingDiagnosesCodeSequence
+REMOVE AdmittingDate
+REMOVE AdmittingTime
+REMOVE VisitComments
+REMOVE RequestedProcedurePriority
+REMOVE ReasonForTheImagingServiceRequest
+REMOVE InterpretationTranscriber
+REMOVE DeidentificationMethodCodeSequence
+REMOVE RequestedProcedureCodeSequence
+
+ADD PatientIdentityRemoved YES
+ADD DeidentificationMethod https://github.com/sonqduong/deid-echo
+ADD BurnedInAnnotation NO
