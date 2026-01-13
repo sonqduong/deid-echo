@@ -91,6 +91,56 @@ FINAL_COLUMNS = [
     "error",
 ]
 
+# ---------------- Dictionary of Top Mask overrides beyond upper bounding box ----------------
+# Keyed by (Manufacturer, ManufacturerModelName), defaults to 1%
+
+BUFFER_PCT_DEFAULT = 0.01
+
+BUFFER_PCT_BY_MFG_MODEL: Dict[Tuple[str, str], float] = {
+    ("ACUSON", "CYPRESS"): 0.10,
+    ("GE HEALTHCARE", "VIVID I"): 0.07,
+    ("GE ULTRASOUND", "VIVID T8"): 0.07,
+    ("GE VINGMED ULTRASOUND", "VIVID E9"): 0.06,
+    ("GE VINGMED ULTRASOUND", "VIVID E95"): 0.05,
+    ("GE VINGMED ULTRASOUND", "VIVID T9"): 0.05,
+    ("GE VINGMED ULTRASOUND", "VIVID7"): 0.07,
+    ("GEMS ULTRASOUND", "VIVID7"): 0.08,
+    ("GEMS ULTRASOUND", "VIVID I"): 0.06,
+    ("GEMS ULTRASOUND", "VIVID Q"): 0.06,
+    ("ACUSON", "SEQUOIA"): 0.03,
+    # add more:
+    # Use wildcards i.e ("*", "*") as a global fallback or specific manufacturer.
+    # case insensitive
+    # examples:
+    # ("PHILIPS", "IE33"): 0.02,
+    # ("GE MEDICAL SYSTEMS", "VIVID E95"): 0.03,
+}
+
+
+def _norm_tag(x: Any) -> str:
+    return str(x or "").strip().upper()
+
+
+def get_buffer_pct(manufacturer: Any, model: Any) -> float:
+    """
+    Resolution order:
+      1) exact (MFG, MODEL)
+      2) manufacturer wildcard (MFG, "*")
+      3) global wildcard ("*", "*")
+      4) default
+    """
+    m = _norm_tag(manufacturer)
+    mo = _norm_tag(model)
+
+    if (m, mo) in BUFFER_PCT_BY_MFG_MODEL:
+        return float(BUFFER_PCT_BY_MFG_MODEL[(m, mo)])
+    if (m, "*") in BUFFER_PCT_BY_MFG_MODEL:
+        return float(BUFFER_PCT_BY_MFG_MODEL[(m, "*")])
+    if ("*", "*") in BUFFER_PCT_BY_MFG_MODEL:
+        return float(BUFFER_PCT_BY_MFG_MODEL[("*", "*")])
+    return float(BUFFER_PCT_DEFAULT)
+
+
 # recycle workers every N tasks to limit memory bloat
 MAX_TASKS_PER_CHILD = 500
 
@@ -244,6 +294,8 @@ def process_one(
         "dcmtk_rewrite_success": False,
         "dcmtk_rewrite_attempted": False,
     }
+
+    buffer_pct = BUFFER_PCT_DEFAULT
 
     out_csv = worker_log_path(LOG_DIR_, worker_id)
 
@@ -469,10 +521,18 @@ def process_one(
         append_row_to_worker_csv(row, out_csv, final_columns)
         return row
 
+    # Decide buffer_pct based on Manufacturer + ManufacturerModelName (must be before pixel pass)
+    buffer_pct = get_buffer_pct(
+        row.get("Manufacturer", ""),
+        row.get("ManufacturerModelName", ""),
+    )
+
     # --- PIXEL PASS ---
     try:
         cleaner = DicomCleaner(output_folder=str(out_dir), deid=str(RECIPE_PATH_))
-        cleaner.detect(str(header_cleaned_path), mask_above_top=True, buffer_pct=0.01)
+        cleaner.detect(
+            str(header_cleaned_path), mask_above_top=True, buffer_pct=buffer_pct
+        )
         cleaner.clean()
 
         pixel_cleaned = cleaner.save_dicom(filename=base_name, jpeg_ls=True)
