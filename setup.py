@@ -13,7 +13,7 @@ def get_lookup():
     """
     lookup = dict()
     version_file = os.path.join("deid", "version.py")
-    with open(version_file) as filey:
+    with open(version_file, encoding="utf-8") as filey:
         exec(filey.read(), lookup)
     return lookup
 
@@ -47,7 +47,7 @@ PACKAGE_URL = lookup["PACKAGE_URL"]
 KEYWORDS = lookup["KEYWORDS"]
 DESCRIPTION = lookup["DESCRIPTION"]
 LICENSE = lookup["LICENSE"]
-with open("README.md") as filey:
+with open("README.md", encoding="utf-8") as filey:
     LONG_DESCRIPTION = filey.read()
 
 ################################################################################

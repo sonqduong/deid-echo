@@ -1,6 +1,7 @@
 import argparse
 import multiprocessing as mp
 import os
+import platform
 import random
 import shutil
 import subprocess
@@ -729,7 +730,8 @@ def main() -> None:
     print(f"[INFO] Resume: {len(done_src)} already done; {len(todo)} to process.")
 
     # ---------------- RUN PARALLEL  ----------------
-    ctx = mp.get_context("fork")  # other option is spawn if unstable
+    start_method = "spawn" if platform.system().lower().startswith("win") else "fork"
+    ctx = mp.get_context(start_method)
     tasks = []
     n_workers = int(args.workers)
 
