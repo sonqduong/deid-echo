@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -587,19 +587,52 @@ class ScanGeometry:
     vs: List[int]
 
 
+@dataclass(frozen=True)
+class JPEGRedactionPlan:
+    """
+    Precomputed block redaction decisions for one JPEG geometry and pixel mask.
+
+    Decisions are component-major, then MCU-major, then block-within-component.
+    The plan contains only "where to redact"; per-frame coefficient values are
+    still decoded from each frame to preserve valid DC predictors.
+    """
+
+    width: int
+    height: int
+    max_h: int
+    max_v: int
+    n_mcu_h: int
+    n_mcu_v: int
+    hs: Tuple[int, ...]
+    vs: Tuple[int, ...]
+    decisions: Tuple[Tuple[Tuple[bool, ...], ...], ...]
+
+
 class BaselineEntropyEditor:
-    def __init__(self, state: JPEGState, mask: np.ndarray):
+    def __init__(
+        self,
+        state: JPEGState,
+        mask: Optional[np.ndarray] = None,
+        plan: Optional[JPEGRedactionPlan] = None,
+    ):
         if state.sof0 is None or state.sos is None:
             raise JPEGParseError("Need SOF0 and SOS")
         self.state = state
-        self.mask = np.asarray(mask).astype(bool)
         self.geom = self._build_geometry(state)
-        h, w = self.mask.shape[:2]
-        if h != state.sof0.height or w != state.sof0.width:
-            raise ValueError(
-                f"Mask shape {self.mask.shape} does not match JPEG image size "
-                f"({state.sof0.height}, {state.sof0.width})"
-            )
+        if plan is None:
+            if mask is None:
+                raise ValueError("Need mask or precomputed JPEGRedactionPlan")
+            mask_arr = np.asarray(mask).astype(bool)
+            h, w = mask_arr.shape[:2]
+            if h != state.sof0.height or w != state.sof0.width:
+                raise ValueError(
+                    f"Mask shape {mask_arr.shape} does not match JPEG image size "
+                    f"({state.sof0.height}, {state.sof0.width})"
+                )
+            self.plan = self.build_redaction_plan(state, mask_arr)
+        else:
+            self._validate_plan(state, plan)
+            self.plan = plan
 
         # Per-component target quantized DC for a flat black replacement block.
         # JPEG uses a level shift of 128 before DCT, so a constant black block
@@ -622,6 +655,94 @@ class BaselineEntropyEditor:
             else:
                 target = int(round(-1024.0 / q00)) if i == 0 else 0
             self._black_target_dc.append(target)
+
+    @classmethod
+    def geometry_signature(cls, state: JPEGState) -> Tuple[Any, ...]:
+        geom = cls._build_geometry(state)
+        sof = state.sof0
+        return (
+            sof.width,
+            sof.height,
+            geom.max_h,
+            geom.max_v,
+            geom.n_mcu_h,
+            geom.n_mcu_v,
+            tuple(geom.hs),
+            tuple(geom.vs),
+        )
+
+    @classmethod
+    def build_redaction_plan(
+        cls, state: JPEGState, mask: np.ndarray
+    ) -> JPEGRedactionPlan:
+        if state.sof0 is None or state.sos is None:
+            raise JPEGParseError("Need SOF0/SOS")
+        geom = cls._build_geometry(state)
+        mask_arr = np.asarray(mask).astype(bool)
+        h, w = mask_arr.shape[:2]
+        if h != state.sof0.height or w != state.sof0.width:
+            raise ValueError(
+                f"Mask shape {mask_arr.shape} does not match JPEG image size "
+                f"({state.sof0.height}, {state.sof0.width})"
+            )
+
+        h_mcu_size = 8 * geom.max_h
+        v_mcu_size = 8 * geom.max_v
+        decisions_by_component = []
+        n_total_mcus = geom.n_mcu_h * geom.n_mcu_v
+        for c, (this_h, this_v) in enumerate(zip(geom.hs, geom.vs)):
+            h_block_size = 8 * geom.max_h // this_h
+            v_block_size = 8 * geom.max_v // this_v
+            component_decisions = []
+            for absolute_mcu in range(n_total_mcus):
+                row_mcu = absolute_mcu // geom.n_mcu_h
+                col_mcu = absolute_mcu % geom.n_mcu_h
+                mcu_decisions = []
+                for v_idx in range(this_v):
+                    for h_idx in range(this_h):
+                        x0 = col_mcu * h_mcu_size + h_idx * h_block_size
+                        y0 = row_mcu * v_mcu_size + v_idx * v_block_size
+                        x1 = min(state.sof0.width, x0 + h_block_size)
+                        y1 = min(state.sof0.height, y0 + v_block_size)
+                        redact = (
+                            False
+                            if x0 >= x1 or y0 >= y1
+                            else bool(mask_arr[y0:y1, x0:x1].any())
+                        )
+                        mcu_decisions.append(redact)
+                component_decisions.append(tuple(mcu_decisions))
+            decisions_by_component.append(tuple(component_decisions))
+
+        return JPEGRedactionPlan(
+            width=state.sof0.width,
+            height=state.sof0.height,
+            max_h=geom.max_h,
+            max_v=geom.max_v,
+            n_mcu_h=geom.n_mcu_h,
+            n_mcu_v=geom.n_mcu_v,
+            hs=tuple(geom.hs),
+            vs=tuple(geom.vs),
+            decisions=tuple(decisions_by_component),
+        )
+
+    @classmethod
+    def _validate_plan(cls, state: JPEGState, plan: JPEGRedactionPlan) -> None:
+        signature = cls.geometry_signature(state)
+        plan_signature = (
+            plan.width,
+            plan.height,
+            plan.max_h,
+            plan.max_v,
+            plan.n_mcu_h,
+            plan.n_mcu_v,
+            plan.hs,
+            plan.vs,
+        )
+        if signature != plan_signature:
+            raise ValueError(
+                f"JPEG redaction plan geometry {plan_signature} does not match "
+                f"JPEG frame geometry {signature}"
+            )
 
     @staticmethod
     def _build_geometry(state: JPEGState) -> ScanGeometry:
@@ -675,6 +796,7 @@ class BaselineEntropyEditor:
 
     def _redaction_decision(
         self,
+        component_index: int,
         col_mcu: int,
         row_mcu: int,
         this_h: int,
@@ -682,19 +804,9 @@ class BaselineEntropyEditor:
         h_idx: int,
         v_idx: int,
     ) -> bool:
-        # Mirrors PixelMed's block-level decision in image coordinates.
-        h_mcu_size = 8 * self.geom.max_h
-        v_mcu_size = 8 * self.geom.max_v
-        h_block_size = 8 * self.geom.max_h // this_h
-        v_block_size = 8 * self.geom.max_v // this_v
-
-        x0 = col_mcu * h_mcu_size + h_idx * h_block_size
-        y0 = row_mcu * v_mcu_size + v_idx * v_block_size
-        x1 = min(self.state.sof0.width, x0 + h_block_size)
-        y1 = min(self.state.sof0.height, y0 + v_block_size)
-        if x0 >= x1 or y0 >= y1:
-            return False
-        return bool(self.mask[y0:y1, x0:x1].any())
+        absolute_mcu = row_mcu * self.geom.n_mcu_h + col_mcu
+        block_index = v_idx * this_h + h_idx
+        return self.plan.decisions[component_index][absolute_mcu][block_index]
 
     def _write_eob(self, writer: BitWriter, ac_table: HuffmanTable) -> None:
         if ac_table.eob_code is None or ac_table.eob_size is None:
@@ -789,7 +901,7 @@ class BaselineEntropyEditor:
                 for v_idx in range(this_v):
                     for h_idx in range(this_h):
                         redact = self._redaction_decision(
-                            col_mcu, row_mcu, this_h, this_v, h_idx, v_idx
+                            c, col_mcu, row_mcu, this_h, this_v, h_idx, v_idx
                         )
                         first_redaction = redact and not was_redacting[c]
                         original_dc[c] = self._process_one_block(
@@ -824,7 +936,14 @@ def _serialize_segment(marker: int, payload: Optional[bytes]) -> bytes:
     return bytes(out)
 
 
-def redact_baseline_jpeg_bytes(jpeg_bytes: bytes, mask: np.ndarray) -> bytes:
+def redact_baseline_jpeg_bytes(
+    jpeg_bytes: bytes,
+    mask: Optional[np.ndarray] = None,
+    *,
+    plan: Optional[JPEGRedactionPlan] = None,
+    plan_cache: Optional[Dict[Tuple[Any, ...], JPEGRedactionPlan]] = None,
+    plan_cache_key: Optional[Tuple[Any, ...]] = None,
+) -> bytes:
     """
     Selectively redact a baseline JPEG using a pixel mask.
 
@@ -833,7 +952,8 @@ def redact_baseline_jpeg_bytes(jpeg_bytes: bytes, mask: np.ndarray) -> bytes:
     jpeg_bytes:
         Full JPEG bitstream.
     mask:
-        2D boolean or 0/1 ndarray in decompressed image coordinates.
+        2D boolean or 0/1 ndarray in decompressed image coordinates. Required
+        unless a compatible precomputed plan is supplied.
 
     Returns
     -------
@@ -849,7 +969,19 @@ def redact_baseline_jpeg_bytes(jpeg_bytes: bytes, mask: np.ndarray) -> bytes:
     if len(state.marker_segments_before_sos) == 0:
         raise JPEGParseError("Malformed JPEG")
 
-    editor = BaselineEntropyEditor(state, mask)
+    if plan is None and plan_cache is not None and plan_cache_key is not None:
+        cache_key = (
+            plan_cache_key,
+            BaselineEntropyEditor.geometry_signature(state),
+        )
+        plan = plan_cache.get(cache_key)
+        if plan is None:
+            if mask is None:
+                raise ValueError("Need mask to create cached JPEG redaction plan")
+            plan = BaselineEntropyEditor.build_redaction_plan(state, mask)
+            plan_cache[cache_key] = plan
+
+    editor = BaselineEntropyEditor(state, mask=mask, plan=plan)
     n_total_mcus = editor.geom.n_mcu_h * editor.geom.n_mcu_v
     restart_interval = state.restart_interval
 
@@ -901,7 +1033,13 @@ def redact_baseline_jpeg_bytes(jpeg_bytes: bytes, mask: np.ndarray) -> bytes:
 # -----------------------------------------------------------------------------
 
 
-def redact_encapsulated_baseline_jpeg_frames(ds, masks: Sequence[np.ndarray]):
+def redact_encapsulated_baseline_jpeg_frames(
+    ds,
+    masks: Sequence[np.ndarray],
+    *,
+    plan_cache: Optional[Dict[Tuple[Any, ...], JPEGRedactionPlan]] = None,
+    plan_cache_key: Optional[Tuple[Any, ...]] = None,
+):
     """
     Return a copy of a DICOM dataset whose encapsulated JPEG Baseline frames have
     been selectively redacted using supplied pixel masks.
@@ -938,7 +1076,12 @@ def redact_encapsulated_baseline_jpeg_frames(ds, masks: Sequence[np.ndarray]):
         if arr.shape[:2] != (rows, cols):
             raise ValueError(f"Mask {i} has shape {arr.shape}, expected {(rows, cols)}")
         redacted_frames.append(
-            redact_baseline_jpeg_bytes(frame_bytes, arr.astype(bool))
+            redact_baseline_jpeg_bytes(
+                frame_bytes,
+                arr.astype(bool),
+                plan_cache=plan_cache,
+                plan_cache_key=plan_cache_key,
+            )
         )
 
     out.PixelData = encapsulate(redacted_frames)
@@ -988,7 +1131,7 @@ def expand_mask_to_jpeg_units(mask: np.ndarray, jpeg_bytes: bytes) -> np.ndarray
                 for v_idx in range(this_v):
                     for h_idx in range(this_h):
                         if editor._redaction_decision(
-                            col_mcu, row_mcu, this_h, this_v, h_idx, v_idx
+                            c, col_mcu, row_mcu, this_h, this_v, h_idx, v_idx
                         ):
                             x0 = col_mcu * h_mcu_size + h_idx * h_block_size
                             y0 = row_mcu * v_mcu_size + v_idx * v_block_size

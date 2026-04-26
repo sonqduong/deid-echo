@@ -1,0 +1,54 @@
+PixelMed Java JPEG Selective Block Redaction Codec
+==================================================
+
+This directory vendors the official PixelMed JPEG codec jar:
+
+  pixelmed_codec.jar
+
+Source:
+
+  https://www.dclunie.com/pixelmed/software/codec/20200328_current/
+
+The PixelMed JPEG codec page states that the toolkit is open source and made
+freely available for both non-commercial and commercial use under BSD License
+terms:
+
+  https://www.pixelmed.com/jpeg.html
+
+The following notice was copied from the COPYRIGHT file in the corresponding
+PixelMed source release:
+
+This repository also compiles a patched copy of PixelMed's
+com.pixelmed.codec.jpeg.EntropyCodedSegment class ahead of the jar on the Java
+classpath. The patch changes redacted DCT blocks from PixelMed's original
+neutral gray target to black luminance with neutral chroma, while preserving the
+same BSD license notice below.
+
+Copyright (c) 2014-2017, David A. Clunie DBA PixelMed Publishing. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are
+permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of
+   conditions and the following disclaimers.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of
+   conditions and the following disclaimers in the documentation and/or other materials
+   provided with the distribution.
+
+3. Neither the name of PixelMed Publishing nor the names of its contributors may
+   be used to endorse or promote products derived from this software.
+
+This software is provided by the copyright holders and contributors "as is" and any
+express or implied warranties, including, but not limited to, the implied warranties
+of merchantability and fitness for a particular purpose are disclaimed. In no event
+shall the copyright owner or contributors be liable for any direct, indirect, incidental,
+special, exemplary, or consequential damages (including, but not limited to, procurement
+of substitute goods or services; loss of use, data or profits; or business interruption)
+however caused and on any theory of liability, whether in contract, strict liability, or
+tort (including negligence or otherwise) arising in any way out of the use of this software,
+even if advised of the possibility of such damage.
+
+This software has neither been tested nor approved for clinical use or for incorporation in
+a medical device. It is the redistributor's or user's responsibility to comply with any
+applicable local, state, national or international regulations.

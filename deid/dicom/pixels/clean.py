@@ -7,7 +7,7 @@ import math
 import os
 import random
 import re
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import matplotlib
 import numpy
@@ -28,6 +28,92 @@ bot.level = 3
 
 # JPEG-LS Lossless Transfer Syntax UID (DICOM: 1.2.840.10008.1.2.4.80)
 _JPEGLS_LOSSLESS_UID = UID("1.2.840.10008.1.2.4.80")
+
+
+def _mask_shape_from_pixel_array(
+    original: NDArray, samples_per_pixel: int
+) -> Tuple[int, int]:
+    """
+    Return the 2D mask shape as (rows, columns) for a pydicom pixel_array.
+    """
+    if len(original.shape) == 4 or (
+        len(original.shape) == 3 and samples_per_pixel == 1
+    ):
+        return int(original.shape[1]), int(original.shape[2])
+    return int(original.shape[0]), int(original.shape[1])
+
+
+def _coordinates_from_results(
+    results: dict, rows: int, columns: int
+) -> List[Tuple[int, List[int]]]:
+    """
+    Convert deid pixel-cleaning results to coordinate tuples.
+
+    Coordinates use the recipe/DICOM convention (xmin, ymin, xmax, ymax).
+    """
+    coordinates = []
+
+    for item in results["results"]:
+        for coordinate_set in item.get("coordinates", []):
+            mask_value, new_coordinates = coordinate_set
+
+            if not isinstance(new_coordinates, list):
+                new_coordinates = [new_coordinates]
+
+            for new_coordinate in new_coordinates:
+                if (
+                    isinstance(new_coordinate, str)
+                    and new_coordinate.lower() == "all"
+                ):
+                    new_coordinate = [0, 0, columns, rows]
+                elif isinstance(new_coordinate, str):
+                    new_coordinate = [int(x) for x in new_coordinate.split(",")]
+                else:
+                    new_coordinate = [int(x) for x in new_coordinate]
+                coordinates.append((int(mask_value), new_coordinate))
+
+    return coordinates
+
+
+def build_mask_from_results(results: dict, rows: int, columns: int) -> NDArray:
+    """
+    Build the 2D keep-mask used for pixel cleaning.
+
+    Mask value 1 means keep the original pixel. Mask value 0 means redact/black.
+    """
+    coordinates = _coordinates_from_results(results, rows, columns)
+
+    if results.get("flagged") and not coordinates:
+        raise RuntimeError(
+            "Pixel cleaning aborted: detect() flagged file but no valid masking "
+            "coordinates were produced after filtering."
+        )
+
+    mask = numpy.ones((rows, columns), dtype=numpy.uint8)
+    for coordinate_value, coordinate in coordinates:
+        minr, minc, maxr, maxc = coordinate
+        mask[minc:maxc, minr:maxr] = coordinate_value
+    return mask
+
+
+def _mask_view_for_pixels(
+    mask: NDArray, original: NDArray, samples_per_pixel: int
+) -> NDArray:
+    """
+    Return a broadcastable view of a 2D mask for the given pixel array shape.
+    """
+    if len(original.shape) == 4:
+        return mask[None, :, :, None]
+
+    if len(original.shape) == 3:
+        if samples_per_pixel == 3:
+            return mask[:, :, None]
+        return mask[None, :, :]
+
+    if len(original.shape) == 2:
+        return mask
+
+    raise ValueError(f"Unsupported pixel array shape for masking: {original.shape}")
 
 
 class DicomCleaner:
@@ -414,107 +500,13 @@ def clean_pixel_data(
                 f"Failed PALETTE COLOR -> RGB conversion; proceeding without LUT. err={e!r}"
             )
 
-    # Compile coordinates from result, generate list of tuples with coordinate and value
-    # keepcoordinates == 1 (included in mask) and coordinates == 0 (remove).
-    coordinates = []
-
-    for item in results["results"]:
-        # We iterate through coordinates in order specified in file
-        for coordinate_set in item.get("coordinates", []):
-            # Each is a list with [value, coordinate]
-            mask_value, new_coordinates = coordinate_set
-
-            if not isinstance(new_coordinates, list):
-                new_coordinates = [new_coordinates]
-
-            for new_coordinate in new_coordinates:
-                # Case 1: an "all" indicates applying to entire image
-                if new_coordinate.lower() == "all":
-                    # 2D - Greyscale Image - Shape = (X, Y) OR 3D - RGB Image - Shape = (X, Y, Channel)
-                    if len(original.shape) == 2 or (
-                        len(original.shape) == 3 and spp == 3
-                    ):
-                        # minr, minc, maxr, maxc = [0, 0, Y, X]
-                        new_coordinate = [
-                            0,
-                            0,
-                            original.shape[1],
-                            original.shape[0],
-                        ]
-
-                    # 4D - RGB Cine Clip - Shape = (frames, X, Y, channel) OR 3D - Greyscale Cine Clip - Shape = (frames, X, Y)
-                    if len(original.shape) == 4 or (
-                        len(original.shape) == 3 and spp == 1
-                    ):
-                        new_coordinate = [
-                            0,
-                            0,
-                            original.shape[2],
-                            original.shape[1],
-                        ]
-                else:
-                    new_coordinate = [int(x) for x in new_coordinate.split(",")]
-                coordinates.append((mask_value, new_coordinate))
-
-    # ---------------- Make sure there are coordinates ----------------
-    if results.get("flagged") and not coordinates:
-        raise RuntimeError(
-            "Pixel cleaning aborted: detect() flagged file but no valid masking "
-            "coordinates were produced after filtering."
-        )
-
-    # Instead of writing directly to data, create a mask of 1s (start keeping all)
-    # For 4D RGB Cine - (frames, X, Y, channel) or 3D Greyscale Cine - (frames, X, Y)
-    if len(original.shape) == 4 or (len(original.shape) == 3 and spp == 1):
-        mask = numpy.ones(original.shape[1:3], dtype=numpy.uint8)
-    # For 2D Greyscale image (X, Y) or 3D RGB Image (X, Y channel)
-    else:
-        mask = numpy.ones(original.shape[0:2], dtype=numpy.uint8)
-
-    # Here we apply the coordinates to the mask, 1==keep, 0==clean
-    for coordinate_value, coordinate in coordinates:
-        minr, minc, maxr, maxc = coordinate
-
-        # Update the mask: values set to 0 to be black
-        mask[minc:maxc, minr:maxr] = coordinate_value
+    mask_rows, mask_columns = _mask_shape_from_pixel_array(original, spp)
+    mask = build_mask_from_results(results, mask_rows, mask_columns)
 
     # Now apply finished mask to the data
-    # RGB cine clip
-    if len(original.shape) == 4:
-        # np.tile does the copying and stacking of masks into the channel dim to produce 3D masks
-        # transposition to convert tile output (channel, X, Y)  into (X, Y, channel)
-        # see: https://github.com/nquach/anonymize/blob/master/anonymize.py#L154
-        channel3mask = numpy.transpose(numpy.tile(mask, (3, 1, 1)), (1, 2, 0))
-
-        # use numpy.tile to copy and stack the 3D masks into 4D array to apply to 4D pixel data
-        # tile converts (X, Y, channels) -> (frames, X, Y, channels), presumed ordering for 4D pixel data
-        final_mask = numpy.tile(channel3mask, (original.shape[0], 1, 1, 1))
-
-        # apply final 4D mask to 4D pixel data
-        cleaned = final_mask * original
-
-    # RGB image or Greyscale cine clip
-    elif len(original.shape) == 3:
-        # This condition is ambiguous.  If the image shape is 3, we may have a single frame RGB image: size (X, Y, channel)
-        # or a multiframe greyscale image: size (frames, X, Y).  Interrogate the SamplesPerPixel field.
-        if spp == 3:
-            # RGB Image
-            # Convert (X, Y) -> (X, Y, channel)
-            final_mask = numpy.transpose(
-                numpy.tile(mask, (original.shape[2], 1, 1)), (1, 2, 0)
-            )
-        else:
-            # Greyscale cine clip
-            # Convert (X, Y) -> (frames, X, Y)
-            final_mask = numpy.tile(mask, (original.shape[0], 1, 1))
-
-        # apply final 3D mask to 3D pixel data
-        cleaned = final_mask * original
-
-    # greyscale image: no need to stack into the channel dim since it doesn't exist
-    elif len(original.shape) == 2:
-        cleaned = mask * original
-
+    if len(original.shape) in (2, 3, 4):
+        cleaned = original.copy()
+        cleaned *= _mask_view_for_pixels(mask, original, spp)
     else:
         bot.warning(
             "Pixel array dimension %s is not recognized." % (str(original.shape))

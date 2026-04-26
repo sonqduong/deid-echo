@@ -1,0 +1,10 @@
+name: deid-echo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - dcmtk
+  - openjdk=25.0.2
+  - pip
+  - pip:
+      - -e .

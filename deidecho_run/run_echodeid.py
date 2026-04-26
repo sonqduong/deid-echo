@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import multiprocessing as mp
 import os
 import platform
@@ -9,25 +10,67 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from deid_helpers import (
-    append_row_to_worker_csv,
-    as_int_or_none,
-    extract_region_spatial_formats,
-    fmt3,
-    fmt5,
-    formats_to_str,
-    load_done_src_paths_from_worker_logs,
-    rebuild_master_log,
-    safe_getattr,
-    sanitize_for_path,
-)
+import pydicom
+
+try:
+    from deid_helpers import (
+        append_row_to_worker_csv,
+        as_int_or_none,
+        extract_region_spatial_formats,
+        fmt3,
+        fmt5,
+        formats_to_str,
+        load_done_src_paths_from_worker_logs,
+        rebuild_master_log,
+        safe_getattr,
+        sanitize_for_path,
+    )
+except ImportError:
+    from deidecho_run.deid_helpers import (
+        append_row_to_worker_csv,
+        as_int_or_none,
+        extract_region_spatial_formats,
+        fmt3,
+        fmt5,
+        formats_to_str,
+        load_done_src_paths_from_worker_logs,
+        rebuild_master_log,
+        safe_getattr,
+        sanitize_for_path,
+    )
 
 from deid.dicom.parser import DicomParser
-from deid.dicom.pixels.clean import DicomCleaner
+from deid.dicom.pixels.clean import DicomCleaner, build_mask_from_results
+
+try:
+    from jpeg_selective_redaction import (
+        redact_encapsulated_baseline_jpeg_frames as redact_python_jpeg_baseline_frames,
+    )
+except ImportError:
+    from deidecho_run.jpeg_selective_redaction import (
+        redact_encapsulated_baseline_jpeg_frames as redact_python_jpeg_baseline_frames,
+    )
+
+try:
+    from pixelmed_jpeg_redaction import (
+        PixelMedUnavailableError,
+        mask_to_redaction_rectangles,
+        redact_encapsulated_baseline_jpeg_frames_pixelmed,
+    )
+except ImportError:
+    from deidecho_run.pixelmed_jpeg_redaction import (
+        PixelMedUnavailableError,
+        mask_to_redaction_rectangles,
+        redact_encapsulated_baseline_jpeg_frames_pixelmed,
+    )
 
 # ---------------- CONSTANTS ----------------
+JPEG_BASELINE_TSUID = "1.2.840.10008.1.2.4.50"
+_JPEG_REDACTION_PLAN_CACHE: Dict[Tuple[Any, ...], Any] = {}
+_PIXELMED_UNAVAILABLE_ERROR: str = ""
+
 ALLOWED_SOP: Set[str] = {
     "1.2.840.10008.5.1.4.1.1.3.1",  # US multi-frame
     "1.2.840.10008.5.1.4.1.1.6.1",  # Ultrasound image
@@ -68,6 +111,9 @@ FINAL_COLUMNS = [
     "Manufacturer",
     "ManufacturerModelName",
     "SoftwareVersions",
+    "Rows",
+    "Columns",
+    "NumberOfFrames",
     # --- AFTER values  ---
     "PatientID",
     "StudyDate",
@@ -87,6 +133,18 @@ FINAL_COLUMNS = [
     "pixel_path",
     "pixel_success",
     "size_after_pixel",
+    "TransferSyntaxUID_after_pixel",
+    "detect_s",
+    "compressed_redaction_s",
+    "clean_s",
+    "save_s",
+    "pixel_total_s",
+    "compressed_redaction_attempted",
+    "compressed_redaction_success",
+    "compressed_redaction_codec",
+    "compressed_redaction_error",
+    "compressed_redaction_plan_cache_size",
+    "pixel_redaction_method",
     "overwritten",
     "status",
     "error",
@@ -108,7 +166,7 @@ BUFFER_PCT_BY_MFG_MODEL: Dict[Tuple[str, str], float] = {
     ("GEMS ULTRASOUND", "VIVID7"): 0.08,
     ("GEMS ULTRASOUND", "VIVID I"): 0.06,
     ("GEMS ULTRASOUND", "VIVID Q"): 0.06,
-    ("ACUSON", "SEQUOIA"): 0.03,
+    ("ACUSON", "SEQUOIA"): 0.50,
     # add more:
     # Use wildcards i.e ("*", "*") as a global fallback or specific manufacturer.
     # case insensitive
@@ -142,10 +200,37 @@ def get_buffer_pct(manufacturer: Any, model: Any) -> float:
     return float(BUFFER_PCT_DEFAULT)
 
 
+def resolve_buffer_pct(
+    cli_buffer_pct: Optional[float], manufacturer: Any, model: Any
+) -> float:
+    """
+    Resolve the effective buffer percentage for a file.
+
+    A CLI-provided value overrides all manufacturer/model defaults.
+    """
+    if cli_buffer_pct is not None:
+        return float(cli_buffer_pct)
+    return get_buffer_pct(manufacturer, model)
+
+
+def validate_buffer_pct(buffer_pct: Optional[float]) -> Optional[float]:
+    """
+    Validate an optional CLI buffer percentage.
+    """
+    if buffer_pct is None:
+        return None
+    value = float(buffer_pct)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(
+            f"--buffer-pct must be between 0.0 and 1.0 inclusive; got {buffer_pct}"
+        )
+    return value
+
+
 # recycle workers every N tasks to limit memory bloat
 MAX_TASKS_PER_CHILD = 500
 
-CHUNKSIZE = 1  # Keep at 1, used by Pool.imap_unordered
+CHUNKSIZE = 8  # used by Pool.imap_unordered; higher values improve plan-cache locality
 
 
 def worker_log_path(log_dir: Path, worker_id: int) -> Path:
@@ -255,6 +340,106 @@ def dcmtk_decode_overwrite_inplace(dcm_path: Path) -> Tuple[bool, str]:
     return True, ""
 
 
+def read_transfer_syntax_uid(dcm_path: Path) -> str:
+    try:
+        ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True, force=True)
+        return str(getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", ""))
+    except Exception:
+        return ""
+
+
+def _format_elapsed(start_ts: float) -> str:
+    return f"{time.perf_counter() - start_ts:.6f}"
+
+
+def jpeg_baseline_redact_overwrite_inplace(
+    dcm_path: Path, results: Dict[str, Any]
+) -> Tuple[bool, str, str]:
+    """
+    Redact JPEG Baseline encapsulated pixel data without decompressing.
+
+    Returns (success, error_message, codec). Non-JPEG-Baseline files return
+    (False, "", "") so callers can choose the normal fallback path without
+    logging an error.
+    """
+    ds = pydicom.dcmread(str(dcm_path), force=True)
+    tsuid = str(getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", ""))
+    if tsuid != JPEG_BASELINE_TSUID:
+        return False, "", ""
+
+    rows = int(getattr(ds, "Rows"))
+    columns = int(getattr(ds, "Columns"))
+    number_of_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
+
+    keep_mask = build_mask_from_results(results, rows, columns)
+    redact_mask = keep_mask == 0
+    rectangles = mask_to_redaction_rectangles(redact_mask)
+    frame_rectangles = [rectangles] * number_of_frames
+
+    compressed_errors: List[str] = []
+    if rectangles:
+        global _PIXELMED_UNAVAILABLE_ERROR
+        if _PIXELMED_UNAVAILABLE_ERROR:
+            compressed_errors.append(
+                f"pixelmed_jpeg_baseline_unavailable={_PIXELMED_UNAVAILABLE_ERROR}"
+            )
+        else:
+            try:
+                redacted = redact_encapsulated_baseline_jpeg_frames_pixelmed(
+                    ds, frame_rectangles
+                )
+                redacted.save_as(str(dcm_path))
+                return True, "", "pixelmed_jpeg_baseline"
+            except PixelMedUnavailableError as e:
+                _PIXELMED_UNAVAILABLE_ERROR = repr(e)
+                compressed_errors.append(
+                    f"pixelmed_jpeg_baseline_unavailable={_PIXELMED_UNAVAILABLE_ERROR}"
+                )
+            except Exception as e:
+                compressed_errors.append(f"pixelmed_jpeg_baseline={e!r}")
+    else:
+        return True, "", "no_pixel_redaction_needed"
+
+    plan_cache_key = (
+        rows,
+        columns,
+        hashlib.sha1(redact_mask.tobytes()).hexdigest(),
+    )
+    try:
+        redacted = redact_python_jpeg_baseline_frames(
+            ds,
+            [redact_mask] * number_of_frames,
+            plan_cache=_JPEG_REDACTION_PLAN_CACHE,
+            plan_cache_key=plan_cache_key,
+        )
+        redacted.save_as(str(dcm_path))
+        return True, "", "python_jpeg_baseline"
+    except Exception as e:
+        compressed_errors.append(f"python_jpeg_baseline={e!r}")
+
+    return False, " | ".join(compressed_errors), ""
+
+
+def cache_locality_sort_key(dcm_path: Path) -> Tuple[str, ...]:
+    """
+    Group likely-similar work so multiprocessing chunks reuse per-process plans.
+    """
+    try:
+        ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True, force=True)
+        return (
+            str(getattr(ds, "StudyInstanceUID", "")),
+            str(getattr(ds, "SeriesInstanceUID", "")),
+            str(getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", "")),
+            str(getattr(ds, "Rows", "")),
+            str(getattr(ds, "Columns", "")),
+            str(getattr(ds, "Manufacturer", "")),
+            str(getattr(ds, "ManufacturerModelName", "")),
+            str(dcm_path),
+        )
+    except Exception:
+        return ("", "", "", "", "", "", "", str(dcm_path))
+
+
 def process_one(
     dcm_path_str: str,
     worker_id: int,
@@ -262,6 +447,7 @@ def process_one(
     output_root: str,
     recipe_path: str,
     log_dir: str,
+    cli_buffer_pct: Optional[float],
     allowed_sop: Set[str],
     allowed_rsf: Set[int],
     traits: List,
@@ -291,12 +477,24 @@ def process_one(
         "pixel_path": "",
         "pixel_success": False,
         "size_after_pixel": "",
+        "TransferSyntaxUID_after_pixel": "",
+        "detect_s": "",
+        "compressed_redaction_s": "",
+        "clean_s": "",
+        "save_s": "",
+        "pixel_total_s": "",
+        "compressed_redaction_attempted": False,
+        "compressed_redaction_success": False,
+        "compressed_redaction_codec": "",
+        "compressed_redaction_error": "",
+        "compressed_redaction_plan_cache_size": "",
+        "pixel_redaction_method": "",
         "overwritten": False,
         "dcmtk_rewrite_success": False,
         "dcmtk_rewrite_attempted": False,
     }
 
-    buffer_pct = BUFFER_PCT_DEFAULT
+    buffer_pct = validate_buffer_pct(cli_buffer_pct)
 
     out_csv = worker_log_path(LOG_DIR_, worker_id)
 
@@ -324,6 +522,9 @@ def process_one(
     row["ManufacturerModelName"] = safe_getattr(ds, "ManufacturerModelName", "")
     row["SoftwareVersions"] = safe_getattr(ds, "SoftwareVersions", "")
     row["Modality"] = safe_getattr(ds, "Modality", "")
+    row["Rows"] = safe_getattr(ds, "Rows", "")
+    row["Columns"] = safe_getattr(ds, "Columns", "")
+    row["NumberOfFrames"] = safe_getattr(ds, "NumberOfFrames", "1") or "1"
 
     # --- BEFORE HEADER (existing traits) ---
     for tag_name, col_name in traits:
@@ -522,25 +723,83 @@ def process_one(
         append_row_to_worker_csv(row, out_csv, final_columns)
         return row
 
-    # Decide buffer_pct based on Manufacturer + ManufacturerModelName (must be before pixel pass)
-    buffer_pct = get_buffer_pct(
+    # Decide buffer_pct based on CLI override or Manufacturer + ManufacturerModelName.
+    buffer_pct = resolve_buffer_pct(
+        buffer_pct,
         row.get("Manufacturer", ""),
         row.get("ManufacturerModelName", ""),
     )
 
     # --- PIXEL PASS ---
     try:
+        pixel_total_start = time.perf_counter()
         cleaner = DicomCleaner(output_folder=str(out_dir), deid=str(RECIPE_PATH_))
+        detect_start = time.perf_counter()
         cleaner.detect(
             str(header_cleaned_path), mask_above_top=True, buffer_pct=buffer_pct
         )
-        cleaner.clean()
+        row["detect_s"] = _format_elapsed(detect_start)
 
+        tsuid_before_pixel = read_transfer_syntax_uid(header_cleaned_path)
+        if tsuid_before_pixel == JPEG_BASELINE_TSUID:
+            row["compressed_redaction_attempted"] = True
+            row["compressed_redaction_codec"] = "jpeg_baseline"
+            compressed_start = time.perf_counter()
+            try:
+                fast_ok, fast_err, fast_codec = jpeg_baseline_redact_overwrite_inplace(
+                    header_cleaned_path, cleaner.results
+                )
+            except Exception as e:
+                fast_ok = False
+                fast_err = repr(e)
+                fast_codec = ""
+            row["compressed_redaction_s"] = _format_elapsed(compressed_start)
+            row["compressed_redaction_plan_cache_size"] = len(
+                _JPEG_REDACTION_PLAN_CACHE
+            )
+            if fast_codec:
+                row["compressed_redaction_codec"] = fast_codec
+
+            if fast_ok:
+                size_after_pixel = header_cleaned_path.stat().st_size
+                row["pixel_total_s"] = _format_elapsed(pixel_total_start)
+                row.update(
+                    {
+                        "pixel_path": str(header_cleaned_path),
+                        "pixel_success": True,
+                        "size_after_pixel": size_after_pixel,
+                        "TransferSyntaxUID_after_pixel": read_transfer_syntax_uid(
+                            header_cleaned_path
+                        ),
+                        "compressed_redaction_success": True,
+                        "compressed_redaction_error": "",
+                        "pixel_redaction_method": fast_codec
+                        or "compressed_jpeg_baseline",
+                        "overwritten": True,
+                        "status": "success",
+                    }
+                )
+                append_row_to_worker_csv(row, out_csv, final_columns)
+                return row
+
+            row["compressed_redaction_error"] = fast_err or "unknown_error"
+            row["pixel_redaction_method"] = "decompressed_fallback"
+
+        clean_start = time.perf_counter()
+        cleaner.clean()
+        row["clean_s"] = _format_elapsed(clean_start)
+
+        save_start = time.perf_counter()
         pixel_cleaned = cleaner.save_dicom(filename=base_name, jpeg_ls=True)
+        row["save_s"] = _format_elapsed(save_start)
         pixel_path = Path(pixel_cleaned)
 
         pixel_success = bool(pixel_path.is_file())
         size_after_pixel = pixel_path.stat().st_size if pixel_success else ""
+        tsuid_after_pixel = (
+            read_transfer_syntax_uid(pixel_path) if pixel_success else ""
+        )
+        row["pixel_total_s"] = _format_elapsed(pixel_total_start)
 
         overwritten = (
             pixel_success and pixel_path.resolve() == header_cleaned_path.resolve()
@@ -580,6 +839,9 @@ def process_one(
                 "pixel_path": str(pixel_path),
                 "pixel_success": True,
                 "size_after_pixel": size_after_pixel,
+                "TransferSyntaxUID_after_pixel": tsuid_after_pixel,
+                "pixel_redaction_method": row.get("pixel_redaction_method")
+                or "decompressed_pixel_array",
                 "overwritten": True,
                 "status": "success",
             }
@@ -588,6 +850,8 @@ def process_one(
         return row
 
     except Exception as e:
+        if "pixel_total_start" in locals():
+            row["pixel_total_s"] = _format_elapsed(pixel_total_start)
         try:
             if "pixel_cleaned" in locals() and pixel_cleaned:
                 p = Path(pixel_cleaned)
@@ -627,7 +891,7 @@ def _process_one_star(args_tuple):
     return process_one(*args_tuple)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="De-identify DICOM headers + clean pixels in parallel."
     )
@@ -666,11 +930,24 @@ def parse_args() -> argparse.Namespace:
         default=500,
         help="Rebuild master log every N completed files.",
     )
-    return ap.parse_args()
+    ap.add_argument(
+        "--chunksize",
+        type=int,
+        default=CHUNKSIZE,
+        help="Multiprocessing chunk size. Higher values improve JPEG plan-cache reuse.",
+    )
+    ap.add_argument(
+        "--buffer-pct",
+        type=float,
+        default=None,
+        help="Optional global buffer override from 0.0 to 1.0. If provided, this overrides all manufacturer/model buffer settings.",
+    )
+    return ap.parse_args(argv)
 
 
 def main() -> None:
     args = parse_args()
+    args.buffer_pct = validate_buffer_pct(args.buffer_pct)
 
     # ---------------- ENV ----------------
     if args.salt:
@@ -720,8 +997,10 @@ def main() -> None:
     if args.subsample is not None and args.subsample > 0:
         n = min(args.subsample, total_files)
         dcm_files = random.sample(dcm_files, n)
+        dcm_files = sorted(dcm_files, key=cache_locality_sort_key)
         print(f"[INFO] Found {total_files} files; sampling {n}.")
     else:
+        dcm_files = sorted(dcm_files, key=cache_locality_sort_key)
         print(f"[INFO] Processing all {total_files} files.")
 
     # ---------------- RESUME SUPPORT ----------------
@@ -734,13 +1013,14 @@ def main() -> None:
     ctx = mp.get_context(start_method)
     tasks = []
     n_workers = int(args.workers)
+    chunksize = max(1, int(args.chunksize))
 
     # --- WRITE METRICS HEADER (RUN CONFIG) ---
     with open(METRICS_TXT, "w", encoding="utf-8") as f:
         f.write("# deid-echo metrics\n")
         f.write(f"# start_time: {_metrics_ts()}\n")
         f.write(f"# workers: {n_workers}\n")
-        f.write(f"# chunksize: {CHUNKSIZE}\n")
+        f.write(f"# chunksize: {chunksize}\n")
         f.write(f"# multiprocessing_method: {ctx.get_start_method()}\n")
         f.write(f"# maxtasksperchild: {MAX_TASKS_PER_CHILD}\n")
         f.write("# -----------------------------------------\n")
@@ -801,6 +1081,7 @@ def main() -> None:
                 str(OUTPUT_ROOT),
                 str(RECIPE_PATH),
                 str(LOG_DIR),
+                args.buffer_pct,
                 ALLOWED_SOP,
                 ALLOWED_RSF,
                 TRAITS,
@@ -814,7 +1095,9 @@ def main() -> None:
             initializer=_init_worker,
             maxtasksperchild=MAX_TASKS_PER_CHILD,
         ) as pool:
-            for _ in pool.imap_unordered(_process_one_star, tasks, chunksize=CHUNKSIZE):
+            for _ in pool.imap_unordered(
+                _process_one_star, tasks, chunksize=chunksize
+            ):
                 completed += 1
                 interval_completed += 1
 

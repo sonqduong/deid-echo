@@ -33,10 +33,10 @@ echocardiography workflows:
 
 `deid-echo` must be installed from source (either from a local clone or directly from GitHub).
 
-### Create an environment (also with dcmtk)
+### Create an environment
 
 ```bash
-conda create -n deid-echo -c conda-forge dcmtk python=3.10 
+conda env create -f environment.yml
 conda activate deid-echo
 ```
 
@@ -139,15 +139,6 @@ Notes: several comand line args are provided, most important is parallelizaiton 
   re-written after pixel cleaning. This is not efficient, but it follows the
   processing model used by `deid`.)
 
-  - Importantly, pixel data recompression into a **lossless compression
-    format** is *hardcoded* to avoid repeated cycles of lossy recompression and
-    to preserve data quality.
-
-    - If files were originally lossy compressed (which is the case for the
-      majority of studies at our center), recompressing the pixel-cleaned
-      file into a lossless format can result in files that are **100–150%
-      larger** than the original. Expect memory and storage requirements to
-      be approximately **150% of the original dataset size**.
   - The original `deid` recipe followed the CTP de-identification protocol,
     which prespecifies coordinates to black out based on ultrasound machine
     make and model (for example, the top “banner” containing patient names).

@@ -430,9 +430,11 @@ def extract_coordinates(
         )
         return []
 
-    # CTP/DICOM: coordinates are (xmin, ymin, xmax, ymax) in pixels from top-left
-    # Full width (0..Columns), rows start_y..height-1 (area to KEEP)
-    keep_area = f"0,{start_y},{width},{height - 1}"
+    # CTP/DICOM: coordinates are (xmin, ymin, xmax, ymax) in pixels from top-left.
+    # NumPy masking uses half-open slices, so ymax must be Rows to keep the
+    # final row. Using height - 1 leaves the bottom row redacted, which expands
+    # to a visible JPEG block band in compressed-domain redaction.
+    keep_area = f"0,{start_y},{width},{height}"
     coordinates = [keep_area]
     bot.debug(
         f"[detect] extract_coordinates: KEEP area [{keep_area}] "
