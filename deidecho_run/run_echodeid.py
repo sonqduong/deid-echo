@@ -420,24 +420,30 @@ def jpeg_baseline_redact_overwrite_inplace(
     return False, " | ".join(compressed_errors), ""
 
 
-def cache_locality_sort_key(dcm_path: Path) -> Tuple[str, ...]:
+def discover_dicom_files(input_root: Path) -> List[Path]:
     """
-    Group likely-similar work so multiprocessing chunks reuse per-process plans.
+    Return all files under input_root in deterministic lexical path order.
     """
-    try:
-        ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True, force=True)
-        return (
-            str(getattr(ds, "StudyInstanceUID", "")),
-            str(getattr(ds, "SeriesInstanceUID", "")),
-            str(getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", "")),
-            str(getattr(ds, "Rows", "")),
-            str(getattr(ds, "Columns", "")),
-            str(getattr(ds, "Manufacturer", "")),
-            str(getattr(ds, "ManufacturerModelName", "")),
-            str(dcm_path),
-        )
-    except Exception:
-        return ("", "", "", "", "", "", "", str(dcm_path))
+    return sorted(p for p in input_root.rglob("*") if p.is_file())
+
+
+def prepare_todo_files(
+    input_root: Path, log_dir: Path, subsample: Optional[int] = None
+) -> Tuple[List[Path], int, Set[str], List[str]]:
+    """
+    Discover input files, optionally subsample, and apply resume filtering.
+    """
+    dcm_files = discover_dicom_files(input_root)
+    total_files = len(dcm_files)
+
+    if subsample is not None and subsample > 0:
+        n = min(subsample, total_files)
+        dcm_files = random.sample(dcm_files, n)
+        dcm_files = sorted(dcm_files)
+
+    done_src = load_done_src_paths_from_worker_logs(log_dir)
+    todo = [str(p) for p in dcm_files if str(p) not in done_src]
+    return dcm_files, total_files, done_src, todo
 
 
 def process_one(
@@ -988,24 +994,20 @@ def main() -> None:
         )
 
     # ---------------- DISCOVER FILES ----------------
-    dcm_files = sorted(p for p in INPUT_ROOT.rglob("*") if p.is_file())
-    total_files = len(dcm_files)
+    dcm_files, total_files, done_src, todo = prepare_todo_files(
+        INPUT_ROOT, LOG_DIR, args.subsample
+    )
     if total_files == 0:
         print(f"[NOTE] No files found under {INPUT_ROOT}")
         raise SystemExit(0)
 
     if args.subsample is not None and args.subsample > 0:
-        n = min(args.subsample, total_files)
-        dcm_files = random.sample(dcm_files, n)
-        dcm_files = sorted(dcm_files, key=cache_locality_sort_key)
+        n = len(dcm_files)
         print(f"[INFO] Found {total_files} files; sampling {n}.")
     else:
-        dcm_files = sorted(dcm_files, key=cache_locality_sort_key)
         print(f"[INFO] Processing all {total_files} files.")
 
     # ---------------- RESUME SUPPORT ----------------
-    done_src = load_done_src_paths_from_worker_logs(LOG_DIR)
-    todo = [str(p) for p in dcm_files if str(p) not in done_src]
     print(f"[INFO] Resume: {len(done_src)} already done; {len(todo)} to process.")
 
     # ---------------- RUN PARALLEL  ----------------
