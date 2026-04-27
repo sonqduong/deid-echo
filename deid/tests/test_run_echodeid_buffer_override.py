@@ -152,6 +152,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(out_root),
                     "/tmp/recipe",
                     str(log_dir),
+                    run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
                     0.25,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,
@@ -190,6 +191,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(out_root),
                     "/tmp/recipe",
                     str(log_dir),
+                    run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
                     0.02,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,
@@ -201,6 +203,48 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
         self.assertTrue(_FakeCleaner.clean_called)
         self.assertEqual(row["pixel_redaction_method"], "decompressed_fallback")
         self.assertEqual(row["status"], "success")
+
+    def test_process_one_require_pixelmed_does_not_fallback_to_decompressed_clean(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ds = _make_dataset(run_echodeid.JPEG_BASELINE_TSUID)
+            out_root = Path(tmpdir) / "out"
+            log_dir = Path(tmpdir) / "logs"
+            out_root.mkdir()
+            log_dir.mkdir()
+
+            parser = _FakeParser("ignored", dicom=ds)
+            with patch.object(run_echodeid, "DicomParser", return_value=parser), patch.object(
+                run_echodeid, "DicomCleaner", _FakeCleaner
+            ), patch.object(
+                run_echodeid, "extract_region_spatial_formats", return_value=[1]
+            ), patch.object(
+                run_echodeid, "append_row_to_worker_csv"
+            ), patch.object(
+                run_echodeid,
+                "jpeg_baseline_redact_overwrite_inplace",
+                return_value=(False, "pixelmed unavailable", ""),
+            ), patch.object(
+                run_echodeid, "read_transfer_syntax_uid", return_value=run_echodeid.JPEG_BASELINE_TSUID
+            ):
+                row = run_echodeid.process_one(
+                    "input.dcm",
+                    0,
+                    tmpdir,
+                    str(out_root),
+                    "/tmp/recipe",
+                    str(log_dir),
+                    run_echodeid.JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED,
+                    0.02,
+                    run_echodeid.ALLOWED_SOP,
+                    run_echodeid.ALLOWED_RSF,
+                    run_echodeid.TRAITS,
+                    run_echodeid.FINAL_COLUMNS,
+                )
+
+        self.assertFalse(_FakeCleaner.clean_called)
+        self.assertEqual(row["status"], "pixel_fail")
+        self.assertEqual(row["pixel_redaction_method"], "require_pixelmed")
+        self.assertEqual(row["compressed_redaction_error"], "pixelmed unavailable")
 
     def test_process_one_without_cli_override_uses_table_lookup(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -229,6 +273,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(out_root),
                     "/tmp/recipe",
                     str(log_dir),
+                    run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
                     None,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,

@@ -7,6 +7,56 @@ from deidecho_run import run_echodeid
 
 
 class TestRunEchoDeidStartup(unittest.TestCase):
+    def test_assess_jpeg_baseline_backend_python_only_skips_preflight(self):
+        status = run_echodeid.assess_jpeg_baseline_backend(
+            run_echodeid.JPEG_BASELINE_BACKEND_PYTHON_ONLY
+        )
+
+        self.assertEqual(status["status"], "skipped")
+        self.assertEqual(status["backend"], run_echodeid.JPEG_BASELINE_BACKEND_PYTHON_ONLY)
+        self.assertIn("preflight skipped", status["message"])
+
+    def test_assess_jpeg_baseline_backend_auto_warns_when_unavailable(self):
+        diagnostics = {
+            "available": False,
+            "java_path": "",
+            "javac_path": "",
+            "jar_path": "",
+            "class_dir": "",
+            "error": "javac not found on PATH",
+        }
+        with patch.object(
+            run_echodeid, "inspect_pixelmed_runtime", return_value=diagnostics
+        ):
+            status = run_echodeid.assess_jpeg_baseline_backend(
+                run_echodeid.JPEG_BASELINE_BACKEND_AUTO
+            )
+
+        self.assertEqual(status["status"], "unavailable")
+        self.assertFalse(status["available"])
+        self.assertIn("fall back to python_jpeg_baseline", status["message"])
+        self.assertIn("javac not found on PATH", status["message"])
+
+    def test_assess_jpeg_baseline_backend_require_pixelmed_errors_when_unavailable(self):
+        diagnostics = {
+            "available": False,
+            "java_path": "",
+            "javac_path": "",
+            "jar_path": "",
+            "class_dir": "",
+            "error": "java not found on PATH",
+        }
+        with patch.object(
+            run_echodeid, "inspect_pixelmed_runtime", return_value=diagnostics
+        ):
+            status = run_echodeid.assess_jpeg_baseline_backend(
+                run_echodeid.JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED
+            )
+
+        self.assertEqual(status["status"], "unavailable")
+        self.assertIn("required", status["message"])
+        self.assertIn("java not found on PATH", status["message"])
+
     def test_discover_dicom_files_returns_lexically_sorted_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

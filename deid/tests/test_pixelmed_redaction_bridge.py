@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pydicom
@@ -8,13 +9,17 @@ from pydicom.encaps import generate_frames
 from deid.dicom.pixels.clean import build_mask_from_results
 
 try:
+    import pixelmed_jpeg_redaction as pixelmed_mod
     from pixelmed_jpeg_redaction import (
+        inspect_pixelmed_runtime,
         mask_to_redaction_rectangles,
         pixelmed_bridge_available,
         redact_baseline_jpeg_bytes_pixelmed,
     )
 except ImportError:
+    from deidecho_run import pixelmed_jpeg_redaction as pixelmed_mod
     from deidecho_run.pixelmed_jpeg_redaction import (
+        inspect_pixelmed_runtime,
         mask_to_redaction_rectangles,
         pixelmed_bridge_available,
         redact_baseline_jpeg_bytes_pixelmed,
@@ -101,6 +106,67 @@ class TestPixelMedJavaBridge(unittest.TestCase):
         redacted = redact_baseline_jpeg_bytes_pixelmed(frame, [])
         self.assertTrue(redacted.startswith(b"\xff\xd8"))
         self.assertTrue(redacted.endswith(b"\xff\xd9"))
+
+
+class TestPixelMedDiagnostics(unittest.TestCase):
+    def test_inspect_pixelmed_runtime_reports_missing_java(self):
+        with patch.object(
+            pixelmed_mod, "resolve_pixelmed_codec_jar", return_value=Path("/tmp/pixelmed_codec.jar")
+        ), patch.object(
+            pixelmed_mod,
+            "_resolve_executable",
+            side_effect=pixelmed_mod.PixelMedUnavailableError("java not found on PATH"),
+        ):
+            diagnostics = inspect_pixelmed_runtime()
+
+        self.assertFalse(diagnostics["available"])
+        self.assertEqual(diagnostics["jar_path"], "/tmp/pixelmed_codec.jar")
+        self.assertEqual(diagnostics["error"], "java not found on PATH")
+
+    def test_inspect_pixelmed_runtime_reports_missing_javac(self):
+        with patch.object(
+            pixelmed_mod, "resolve_pixelmed_codec_jar", return_value=Path("/tmp/pixelmed_codec.jar")
+        ), patch.object(
+            pixelmed_mod,
+            "_resolve_executable",
+            side_effect=["/usr/bin/java", pixelmed_mod.PixelMedUnavailableError("javac not found on PATH")],
+        ):
+            diagnostics = inspect_pixelmed_runtime()
+
+        self.assertFalse(diagnostics["available"])
+        self.assertEqual(diagnostics["java_path"], "/usr/bin/java")
+        self.assertEqual(diagnostics["error"], "javac not found on PATH")
+
+    def test_inspect_pixelmed_runtime_reports_missing_jar(self):
+        with patch.object(
+            pixelmed_mod,
+            "resolve_pixelmed_codec_jar",
+            side_effect=pixelmed_mod.PixelMedUnavailableError("PixelMed codec jar not found"),
+        ):
+            diagnostics = inspect_pixelmed_runtime()
+
+        self.assertFalse(diagnostics["available"])
+        self.assertEqual(diagnostics["error"], "PixelMed codec jar not found")
+
+    def test_inspect_pixelmed_runtime_reports_compile_failure(self):
+        with patch.object(
+            pixelmed_mod, "resolve_pixelmed_codec_jar", return_value=Path("/tmp/pixelmed_codec.jar")
+        ), patch.object(
+            pixelmed_mod,
+            "_resolve_executable",
+            side_effect=["/usr/bin/java", "/usr/bin/javac"],
+        ), patch.object(
+            pixelmed_mod,
+            "compile_pixelmed_bridge",
+            side_effect=pixelmed_mod.PixelMedUnavailableError(
+                "Could not compile PixelMed bridge: bad javac"
+            ),
+        ):
+            diagnostics = inspect_pixelmed_runtime()
+
+        self.assertFalse(diagnostics["available"])
+        self.assertEqual(diagnostics["javac_path"], "/usr/bin/javac")
+        self.assertIn("Could not compile PixelMed bridge", diagnostics["error"])
 
 
 if __name__ == "__main__":

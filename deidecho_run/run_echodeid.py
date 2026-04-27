@@ -56,12 +56,14 @@ except ImportError:
 try:
     from pixelmed_jpeg_redaction import (
         PixelMedUnavailableError,
+        inspect_pixelmed_runtime,
         mask_to_redaction_rectangles,
         redact_encapsulated_baseline_jpeg_frames_pixelmed,
     )
 except ImportError:
     from deidecho_run.pixelmed_jpeg_redaction import (
         PixelMedUnavailableError,
+        inspect_pixelmed_runtime,
         mask_to_redaction_rectangles,
         redact_encapsulated_baseline_jpeg_frames_pixelmed,
     )
@@ -69,7 +71,16 @@ except ImportError:
 # ---------------- CONSTANTS ----------------
 JPEG_BASELINE_TSUID = "1.2.840.10008.1.2.4.50"
 _JPEG_REDACTION_PLAN_CACHE: Dict[Tuple[Any, ...], Any] = {}
-_PIXELMED_UNAVAILABLE_ERROR: str = ""
+_PIXELMED_AUTO_UNAVAILABLE_ERROR: str = ""
+
+JPEG_BASELINE_BACKEND_AUTO = "auto"
+JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED = "require-pixelmed"
+JPEG_BASELINE_BACKEND_PYTHON_ONLY = "python-only"
+JPEG_BASELINE_BACKEND_CHOICES = (
+    JPEG_BASELINE_BACKEND_AUTO,
+    JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED,
+    JPEG_BASELINE_BACKEND_PYTHON_ONLY,
+)
 
 ALLOWED_SOP: Set[str] = {
     "1.2.840.10008.5.1.4.1.1.3.1",  # US multi-frame
@@ -227,6 +238,69 @@ def validate_buffer_pct(buffer_pct: Optional[float]) -> Optional[float]:
     return value
 
 
+def validate_jpeg_baseline_backend(backend: str) -> str:
+    value = str(backend).strip()
+    if value not in JPEG_BASELINE_BACKEND_CHOICES:
+        choices = ", ".join(JPEG_BASELINE_BACKEND_CHOICES)
+        raise ValueError(
+            f"--jpeg-baseline-backend must be one of {choices}; got {backend!r}"
+        )
+    return value
+
+
+def assess_jpeg_baseline_backend(backend: str) -> Dict[str, Any]:
+    """
+    Resolve startup behavior and diagnostics for the selected JPEG backend.
+    """
+    backend = validate_jpeg_baseline_backend(backend)
+    if backend == JPEG_BASELINE_BACKEND_PYTHON_ONLY:
+        return {
+            "backend": backend,
+            "available": False,
+            "status": "skipped",
+            "message": (
+                "JPEG Baseline backend set to python-only; PixelMed preflight skipped."
+            ),
+            "diagnostics": {
+                "available": False,
+                "java_path": "",
+                "javac_path": "",
+                "jar_path": "",
+                "class_dir": "",
+                "error": "",
+            },
+        }
+
+    diagnostics = inspect_pixelmed_runtime()
+    if diagnostics["available"]:
+        return {
+            "backend": backend,
+            "available": True,
+            "status": "available",
+            "message": "PixelMed JPEG Baseline backend is available.",
+            "diagnostics": diagnostics,
+        }
+
+    if backend == JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED:
+        message = (
+            "PixelMed is required for JPEG Baseline redaction but is unavailable: "
+            f"{diagnostics['error']}"
+        )
+    else:
+        message = (
+            "PixelMed unavailable for JPEG Baseline redaction; files will fall back "
+            f"to python_jpeg_baseline. reason={diagnostics['error']}"
+        )
+
+    return {
+        "backend": backend,
+        "available": False,
+        "status": "unavailable",
+        "message": message,
+        "diagnostics": diagnostics,
+    }
+
+
 # recycle workers every N tasks to limit memory bloat
 MAX_TASKS_PER_CHILD = 500
 
@@ -353,7 +427,9 @@ def _format_elapsed(start_ts: float) -> str:
 
 
 def jpeg_baseline_redact_overwrite_inplace(
-    dcm_path: Path, results: Dict[str, Any]
+    dcm_path: Path,
+    results: Dict[str, Any],
+    jpeg_baseline_backend: str,
 ) -> Tuple[bool, str, str]:
     """
     Redact JPEG Baseline encapsulated pixel data without decompressing.
@@ -362,6 +438,7 @@ def jpeg_baseline_redact_overwrite_inplace(
     (False, "", "") so callers can choose the normal fallback path without
     logging an error.
     """
+    backend = validate_jpeg_baseline_backend(jpeg_baseline_backend)
     ds = pydicom.dcmread(str(dcm_path), force=True)
     tsuid = str(getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", ""))
     if tsuid != JPEG_BASELINE_TSUID:
@@ -378,10 +455,16 @@ def jpeg_baseline_redact_overwrite_inplace(
 
     compressed_errors: List[str] = []
     if rectangles:
-        global _PIXELMED_UNAVAILABLE_ERROR
-        if _PIXELMED_UNAVAILABLE_ERROR:
+        global _PIXELMED_AUTO_UNAVAILABLE_ERROR
+        if backend == JPEG_BASELINE_BACKEND_PYTHON_ONLY:
+            pass
+        elif (
+            backend == JPEG_BASELINE_BACKEND_AUTO
+            and _PIXELMED_AUTO_UNAVAILABLE_ERROR
+        ):
             compressed_errors.append(
-                f"pixelmed_jpeg_baseline_unavailable={_PIXELMED_UNAVAILABLE_ERROR}"
+                "pixelmed_jpeg_baseline_unavailable="
+                f"{_PIXELMED_AUTO_UNAVAILABLE_ERROR}"
             )
         else:
             try:
@@ -391,12 +474,18 @@ def jpeg_baseline_redact_overwrite_inplace(
                 redacted.save_as(str(dcm_path))
                 return True, "", "pixelmed_jpeg_baseline"
             except PixelMedUnavailableError as e:
-                _PIXELMED_UNAVAILABLE_ERROR = repr(e)
+                if backend == JPEG_BASELINE_BACKEND_AUTO:
+                    _PIXELMED_AUTO_UNAVAILABLE_ERROR = repr(e)
                 compressed_errors.append(
-                    f"pixelmed_jpeg_baseline_unavailable={_PIXELMED_UNAVAILABLE_ERROR}"
+                    "pixelmed_jpeg_baseline_unavailable="
+                    f"{repr(e) if backend != JPEG_BASELINE_BACKEND_AUTO else _PIXELMED_AUTO_UNAVAILABLE_ERROR}"
                 )
+                if backend == JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED:
+                    return False, " | ".join(compressed_errors), ""
             except Exception as e:
                 compressed_errors.append(f"pixelmed_jpeg_baseline={e!r}")
+                if backend == JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED:
+                    return False, " | ".join(compressed_errors), ""
     else:
         return True, "", "no_pixel_redaction_needed"
 
@@ -413,7 +502,7 @@ def jpeg_baseline_redact_overwrite_inplace(
             plan_cache_key=plan_cache_key,
         )
         redacted.save_as(str(dcm_path))
-        return True, "", "python_jpeg_baseline"
+        return True, " | ".join(compressed_errors), "python_jpeg_baseline"
     except Exception as e:
         compressed_errors.append(f"python_jpeg_baseline={e!r}")
 
@@ -453,6 +542,7 @@ def process_one(
     output_root: str,
     recipe_path: str,
     log_dir: str,
+    jpeg_baseline_backend: str,
     cli_buffer_pct: Optional[float],
     allowed_sop: Set[str],
     allowed_rsf: Set[int],
@@ -500,6 +590,7 @@ def process_one(
         "dcmtk_rewrite_attempted": False,
     }
 
+    jpeg_baseline_backend = validate_jpeg_baseline_backend(jpeg_baseline_backend)
     buffer_pct = validate_buffer_pct(cli_buffer_pct)
 
     out_csv = worker_log_path(LOG_DIR_, worker_id)
@@ -753,7 +844,9 @@ def process_one(
             compressed_start = time.perf_counter()
             try:
                 fast_ok, fast_err, fast_codec = jpeg_baseline_redact_overwrite_inplace(
-                    header_cleaned_path, cleaner.results
+                    header_cleaned_path,
+                    cleaner.results,
+                    jpeg_baseline_backend,
                 )
             except Exception as e:
                 fast_ok = False
@@ -778,7 +871,7 @@ def process_one(
                             header_cleaned_path
                         ),
                         "compressed_redaction_success": True,
-                        "compressed_redaction_error": "",
+                        "compressed_redaction_error": fast_err or "",
                         "pixel_redaction_method": fast_codec
                         or "compressed_jpeg_baseline",
                         "overwritten": True,
@@ -789,6 +882,31 @@ def process_one(
                 return row
 
             row["compressed_redaction_error"] = fast_err or "unknown_error"
+            if jpeg_baseline_backend == JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED:
+                row["pixel_total_s"] = _format_elapsed(pixel_total_start)
+                row.update(
+                    {
+                        "pixel_redaction_method": "require_pixelmed",
+                        "status": "pixel_fail",
+                        "error": fast_err or "unknown_error",
+                        "pixel_success": False,
+                        "overwritten": False,
+                        "pixel_path": "",
+                        "size_after_pixel": "",
+                    }
+                )
+                try:
+                    if header_cleaned_path.exists():
+                        header_cleaned_path.unlink()
+                        row["header_path"] = ""
+                        row["size_after_header"] = ""
+                except Exception as cleanup_err:
+                    row["error"] = (
+                        row.get("error") or ""
+                    ) + f" | header_cleanup_error={cleanup_err!r}"
+                append_row_to_worker_csv(row, out_csv, final_columns)
+                return row
+
             row["pixel_redaction_method"] = "decompressed_fallback"
 
         clean_start = time.perf_counter()
@@ -943,6 +1061,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Multiprocessing chunk size. Higher values improve JPEG plan-cache reuse.",
     )
     ap.add_argument(
+        "--jpeg-baseline-backend",
+        choices=JPEG_BASELINE_BACKEND_CHOICES,
+        default=JPEG_BASELINE_BACKEND_AUTO,
+        help=(
+            "JPEG Baseline redaction backend policy. "
+            "'auto' uses PixelMed when available and falls back to Python, "
+            "'require-pixelmed' fails instead of falling back, and "
+            "'python-only' skips PixelMed entirely."
+        ),
+    )
+    ap.add_argument(
         "--buffer-pct",
         type=float,
         default=None,
@@ -954,6 +1083,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.buffer_pct = validate_buffer_pct(args.buffer_pct)
+    args.jpeg_baseline_backend = validate_jpeg_baseline_backend(
+        args.jpeg_baseline_backend
+    )
 
     # ---------------- ENV ----------------
     if args.salt:
@@ -975,6 +1107,22 @@ def main() -> None:
     LOG_DIR = OUTPUT_ROOT / "logs"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     MASTER_LOG_CSV = OUTPUT_ROOT / "deid_log.csv"
+    jpeg_backend_status = assess_jpeg_baseline_backend(args.jpeg_baseline_backend)
+    strict_preflight_error = None
+
+    if args.jpeg_baseline_backend == JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED:
+        if not jpeg_backend_status["available"]:
+            strict_preflight_error = jpeg_backend_status["message"]
+            print("[ERROR]", jpeg_backend_status["message"])
+        else:
+            print("[INFO]", jpeg_backend_status["message"])
+    elif args.jpeg_baseline_backend == JPEG_BASELINE_BACKEND_AUTO:
+        if jpeg_backend_status["available"]:
+            print("[INFO]", jpeg_backend_status["message"])
+        else:
+            print("[WARN]", jpeg_backend_status["message"])
+    else:
+        print("[INFO]", jpeg_backend_status["message"])
 
     # --- METRICS FILE (ADDED) ---
     METRICS_TXT = OUTPUT_ROOT / "metrics.txt"
@@ -1023,6 +1171,13 @@ def main() -> None:
         f.write(f"# start_time: {_metrics_ts()}\n")
         f.write(f"# workers: {n_workers}\n")
         f.write(f"# chunksize: {chunksize}\n")
+        f.write(f"# jpeg_baseline_backend: {args.jpeg_baseline_backend}\n")
+        f.write(f"# pixelmed_status: {jpeg_backend_status['status']}\n")
+        f.write(f"# pixelmed_message: {jpeg_backend_status['message']}\n")
+        for key in ("java_path", "javac_path", "jar_path", "class_dir", "error"):
+            value = jpeg_backend_status["diagnostics"].get(key, "")
+            if value:
+                f.write(f"# pixelmed_{key}: {value}\n")
         f.write(f"# multiprocessing_method: {ctx.get_start_method()}\n")
         f.write(f"# maxtasksperchild: {MAX_TASKS_PER_CHILD}\n")
         f.write("# -----------------------------------------\n")
@@ -1044,6 +1199,14 @@ def main() -> None:
         interval_completed=0,
         interval_start_ts=interval_start_ts,
     )
+
+    if strict_preflight_error:
+        with open(METRICS_TXT, "a", encoding="utf-8") as f:
+            f.write("# -----------------------------------------\n")
+            f.write(f"# end_time: {_metrics_ts()}\n")
+            f.write("# completed: 0/0\n")
+            f.write(f"# startup_error: {strict_preflight_error}\n")
+        raise RuntimeError(strict_preflight_error)
 
     if len(todo) == 0:
         print("[INFO] Nothing to do. Rebuilding master log and exiting.")
@@ -1083,6 +1246,7 @@ def main() -> None:
                 str(OUTPUT_ROOT),
                 str(RECIPE_PATH),
                 str(LOG_DIR),
+                args.jpeg_baseline_backend,
                 args.buffer_pct,
                 ALLOWED_SOP,
                 ALLOWED_RSF,

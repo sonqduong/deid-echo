@@ -94,6 +94,7 @@ python run_echodeid.py \
   --input-root /path/to/originaldicomfiles \
   --output-root /path/to/deiddicomfiles \
   --recipe-path deidecho_recipe \
+  --jpeg-baseline-backend auto \
   --workers 10 \
   --flush-every 100 \
   --salt 123
@@ -103,6 +104,7 @@ python run_echodeid.py \
   --input-root "C:\path\to\originaldicomfiles" `
   --output-root "C:\path\to\deiddicomgfiles" `
   --recipe-path "deidecho_recipe" `
+  --jpeg-baseline-backend auto `
   --workers 10 `
   --flush-every 100 `
   --salt 123
@@ -164,6 +166,48 @@ Notes: several comand line args are provided, most important is parallelizaiton 
   - any filters applied or errors encountered.
     Additional logs are created during parallel execution that allow the process
     to be resumed if it crashes.
+
+### HPC / batch usage
+
+For JPEG Baseline redaction, `deid-echo` can use a faster PixelMed-backed path.
+Batch jobs should make that dependency chain explicit instead of relying on an
+implicit fallback.
+
+- Prefer activating the conda environment before running:
+
+  ```bash
+  conda activate deid-echo
+  ```
+
+- If you call the environment's Python directly instead, also expose the env's
+  Java tools:
+
+  ```bash
+  ENV_ROOT=/path/to/.conda/envs/deid-echo
+  export PATH="$ENV_ROOT/bin:$PATH"
+  ```
+
+  or set:
+
+  ```bash
+  export DEIDECHO_JAVA="$ENV_ROOT/bin/java"
+  export DEIDECHO_JAVAC="$ENV_ROOT/bin/javac"
+  ```
+
+- Recommended cluster setting when you want the job to fail fast instead of
+  silently degrading to the slower Python JPEG Baseline path:
+
+  ```bash
+  --jpeg-baseline-backend require-pixelmed
+  ```
+
+- Recommended preflight lines in the batch script:
+
+  ```bash
+  java -version
+  javac -version
+  ls -l deidecho_run/vendor/pixelmed_codec.jar
+  ```
 
 **Known gotchas:**
 

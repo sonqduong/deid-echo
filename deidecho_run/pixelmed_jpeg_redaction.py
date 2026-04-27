@@ -16,7 +16,7 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -135,14 +135,40 @@ def compile_pixelmed_bridge(
     return class_dir
 
 
-def pixelmed_bridge_available() -> bool:
+def inspect_pixelmed_runtime() -> Dict[str, Any]:
+    """
+    Return structured diagnostics for the PixelMed Java bridge runtime.
+    """
+    diagnostics: Dict[str, Any] = {
+        "available": False,
+        "java_path": "",
+        "javac_path": "",
+        "jar_path": "",
+        "class_dir": "",
+        "error": "",
+    }
+
     try:
-        resolve_pixelmed_codec_jar()
-        _resolve_executable("DEIDECHO_JAVA", "java")
-        _resolve_executable("DEIDECHO_JAVAC", "javac")
-        return True
-    except PixelMedUnavailableError:
-        return False
+        jar = resolve_pixelmed_codec_jar()
+        diagnostics["jar_path"] = str(jar)
+
+        java = _resolve_executable("DEIDECHO_JAVA", "java")
+        diagnostics["java_path"] = java
+
+        javac = _resolve_executable("DEIDECHO_JAVAC", "javac")
+        diagnostics["javac_path"] = javac
+
+        class_dir = compile_pixelmed_bridge(javac_path=javac, jar_path=jar)
+        diagnostics["class_dir"] = str(class_dir)
+        diagnostics["available"] = True
+    except PixelMedUnavailableError as exc:
+        diagnostics["error"] = str(exc)
+
+    return diagnostics
+
+
+def pixelmed_bridge_available() -> bool:
+    return bool(inspect_pixelmed_runtime()["available"])
 
 
 def mask_to_redaction_rectangles(redact_mask: np.ndarray) -> List[Rectangle]:
