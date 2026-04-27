@@ -273,6 +273,7 @@ def redact_jpeg_frames_with_pixelmed(
     java_path: Optional[str] = None,
     javac_path: Optional[str] = None,
     jar_path: Optional[Path] = None,
+    java_xmx: Optional[str] = None,
 ) -> List[bytes]:
     jar = jar_path or resolve_pixelmed_codec_jar()
     java = java_path or _resolve_executable("DEIDECHO_JAVA", "java")
@@ -280,8 +281,14 @@ def redact_jpeg_frames_with_pixelmed(
     classpath = os.pathsep.join([str(class_dir), str(jar)])
     payload = _write_payload(frames, frame_rectangles)
 
+    cmd = [java]
+    if java_xmx:
+        cmd.append(f"-Xmx{java_xmx}")
+    cmd.extend(["-XX:ActiveProcessorCount=1", "-Xss512k"])
+    cmd.extend(["-cp", classpath, "PixelMedRedactionBridge"])
+
     result = subprocess.run(
-        [java, "-cp", classpath, "PixelMedRedactionBridge"],
+        cmd,
         input=payload,
         capture_output=True,
         timeout=timeout_seconds,
@@ -299,9 +306,13 @@ def redact_baseline_jpeg_bytes_pixelmed(
     rectangles: Sequence[Rectangle],
     *,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+    java_xmx: Optional[str] = None,
 ) -> bytes:
     return redact_jpeg_frames_with_pixelmed(
-        [jpeg_bytes], [rectangles], timeout_seconds=timeout_seconds
+        [jpeg_bytes],
+        [rectangles],
+        timeout_seconds=timeout_seconds,
+        java_xmx=java_xmx,
     )[0]
 
 
@@ -310,6 +321,8 @@ def redact_encapsulated_baseline_jpeg_frames_pixelmed(
     frame_rectangles: Sequence[Sequence[Rectangle]],
     *,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+    frame_batch_size: int = 16,
+    java_xmx: Optional[str] = None,
 ):
     """
     Return a copy of a DICOM dataset with PixelMed-redacted JPEG frames.
@@ -318,15 +331,47 @@ def redact_encapsulated_baseline_jpeg_frames_pixelmed(
         raise ImportError("pydicom is required for PixelMed DICOM helpers")
 
     number_of_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
-    frames = list(generate_frames(ds.PixelData, number_of_frames=number_of_frames))
-    if len(frames) != len(frame_rectangles):
+    if number_of_frames != len(frame_rectangles):
         raise ValueError(
-            f"Need {len(frames)} frame rectangle lists, got {len(frame_rectangles)}"
+            f"Need {number_of_frames} frame rectangle lists, got {len(frame_rectangles)}"
+        )
+    frame_batch_size = max(1, int(frame_batch_size))
+
+    redacted_frames: List[bytes] = []
+    batch_frames: List[bytes] = []
+    batch_rectangles: List[Sequence[Rectangle]] = []
+    for frame_index, frame in enumerate(
+        generate_frames(ds.PixelData, number_of_frames=number_of_frames)
+    ):
+        batch_frames.append(frame)
+        batch_rectangles.append(frame_rectangles[frame_index])
+        if len(batch_frames) >= frame_batch_size:
+            redacted_frames.extend(
+                redact_jpeg_frames_with_pixelmed(
+                    batch_frames,
+                    batch_rectangles,
+                    timeout_seconds=timeout_seconds,
+                    java_xmx=java_xmx,
+                )
+            )
+            batch_frames = []
+            batch_rectangles = []
+
+    if batch_frames:
+        redacted_frames.extend(
+            redact_jpeg_frames_with_pixelmed(
+                batch_frames,
+                batch_rectangles,
+                timeout_seconds=timeout_seconds,
+                java_xmx=java_xmx,
+            )
         )
 
-    redacted_frames = redact_jpeg_frames_with_pixelmed(
-        frames, frame_rectangles, timeout_seconds=timeout_seconds
-    )
+    if len(redacted_frames) != number_of_frames:
+        raise PixelMedRedactionError(
+            f"Expected {number_of_frames} redacted frames, got {len(redacted_frames)}"
+        )
+
     out = ds.copy()
     out.PixelData = encapsulate(redacted_frames)
     out[0x7FE00010].is_undefined_length = True

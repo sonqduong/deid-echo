@@ -3,10 +3,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from deid.dicom import fields
 from deidecho_run import run_echodeid
 
 
 class TestRunEchoDeidStartup(unittest.TestCase):
+    def test_field_expansion_is_not_unbounded_cached(self):
+        self.assertFalse(hasattr(fields._get_fields_inner, "cache_info"))
+
     def test_assess_jpeg_baseline_backend_python_only_skips_preflight(self):
         status = run_echodeid.assess_jpeg_baseline_backend(
             run_echodeid.JPEG_BASELINE_BACKEND_PYTHON_ONLY
@@ -143,6 +147,103 @@ class TestRunEchoDeidStartup(unittest.TestCase):
             [str(Path(p).relative_to(root)) for p in todo],
             ["a/1.dcm", "c/3.dcm"],
         )
+
+    def test_prepare_todo_files_reuses_complete_manifest_without_directory_walk(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "input"
+            log_dir = Path(tmpdir) / "logs"
+            root.mkdir()
+            log_dir.mkdir()
+            for rel in ("a/1.dcm", "b/2.dcm"):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x", encoding="utf-8")
+
+            run_echodeid.prepare_todo_files(root, log_dir)
+
+            with patch.object(
+                run_echodeid,
+                "discover_dicom_files",
+                side_effect=AssertionError("manifest resume should not walk input"),
+            ), patch.object(
+                run_echodeid,
+                "load_done_src_paths_from_worker_logs",
+                return_value=set(),
+            ):
+                dcm_files, total_files, done_src, todo = run_echodeid.prepare_todo_files(
+                    root, log_dir
+                )
+
+        self.assertEqual(total_files, 2)
+        self.assertEqual(done_src, set())
+        self.assertEqual(
+            [str(p.relative_to(root)) for p in dcm_files],
+            ["a/1.dcm", "b/2.dcm"],
+        )
+        self.assertEqual(
+            [str(Path(p).relative_to(root)) for p in todo],
+            ["a/1.dcm", "b/2.dcm"],
+        )
+
+    def test_prepare_todo_files_refreshes_incomplete_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "input"
+            log_dir = Path(tmpdir) / "logs"
+            root.mkdir()
+            log_dir.mkdir()
+            path = root / "a" / "1.dcm"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+
+            manifest_path, meta_path = run_echodeid._manifest_paths(log_dir)
+            manifest_path.write_text("src_path\n", encoding="utf-8")
+            meta_path.write_text(
+                '{"complete": false, "input_root": "%s", "subsample": null, "total_files": 1, "file_count": 1}'
+                % str(root.resolve()),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                run_echodeid,
+                "load_done_src_paths_from_worker_logs",
+                return_value=set(),
+            ):
+                dcm_files, total_files, _done_src, todo = run_echodeid.prepare_todo_files(
+                    root, log_dir
+                )
+
+        self.assertEqual(total_files, 1)
+        self.assertEqual([p.name for p in dcm_files], ["1.dcm"])
+        self.assertEqual([Path(p).name for p in todo], ["1.dcm"])
+
+    def test_prepare_todo_files_refresh_flag_ignores_complete_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "input"
+            log_dir = Path(tmpdir) / "logs"
+            root.mkdir()
+            log_dir.mkdir()
+            first = root / "a" / "1.dcm"
+            first.parent.mkdir(parents=True, exist_ok=True)
+            first.write_text("x", encoding="utf-8")
+
+            run_echodeid.prepare_todo_files(root, log_dir)
+
+            second = root / "b" / "2.dcm"
+            second.parent.mkdir(parents=True, exist_ok=True)
+            second.write_text("x", encoding="utf-8")
+
+            with patch.object(
+                run_echodeid,
+                "load_done_src_paths_from_worker_logs",
+                return_value=set(),
+            ):
+                dcm_files, total_files, _done_src, todo = run_echodeid.prepare_todo_files(
+                    root, log_dir, refresh_file_list=True
+                )
+
+        self.assertEqual(total_files, 2)
+        self.assertEqual([p.name for p in dcm_files], ["1.dcm", "2.dcm"])
+        self.assertEqual([Path(p).name for p in todo], ["1.dcm", "2.dcm"])
 
 
 if __name__ == "__main__":

@@ -45,7 +45,13 @@ class DicomParser:
     _excluded_fields = None
 
     def __init__(
-        self, dicom_file, recipe=None, config=None, force=True, disable_skip=False
+        self,
+        dicom_file,
+        recipe=None,
+        config=None,
+        force=True,
+        disable_skip=False,
+        defer_size=None,
     ):
         """
         Create new instance of DicomParser
@@ -55,6 +61,7 @@ class DicomParser:
         :param config: deid config, defaults to None
         :param force: ignore errors when reading a dicom file, defaults to True
         :param disable_skip: _description_, defaults to False
+        :param defer_size: defer large raw elements when reading from disk
         """
 
         # Lookup for the dicom
@@ -79,7 +86,7 @@ class DicomParser:
         if not isinstance(recipe, DeidRecipe):
             recipe = DeidRecipe(recipe)
 
-        self.load(dicom_file, force=force)
+        self.load(dicom_file, force=force, defer_size=defer_size)
         self.recipe = recipe
 
     def __str__(self):
@@ -88,7 +95,7 @@ class DicomParser:
     def __repr__(self):
         return self.__str__()
 
-    def load(self, dicom_file, force=True):
+    def load(self, dicom_file, force=True, defer_size=None):
         """
         Load the dicom file.
 
@@ -105,7 +112,11 @@ class DicomParser:
             # If we must read the file, the path must exist
             if not os.path.exists(dicom_file):
                 bot.exit("%s does not exist." % dicom_file)
-            self.dicom = utils.dcmread(dicom_file, force=force)
+            self.dicom = utils.dcmread(
+                dicom_file,
+                force=force,
+                defer_size=defer_size,
+            )
 
         # Set class variables that might be helpful later
         df = self.dicom.get("filename")

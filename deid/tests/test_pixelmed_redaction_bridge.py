@@ -1,5 +1,7 @@
+import struct
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -15,6 +17,7 @@ try:
         mask_to_redaction_rectangles,
         pixelmed_bridge_available,
         redact_baseline_jpeg_bytes_pixelmed,
+        redact_jpeg_frames_with_pixelmed,
     )
 except ImportError:
     from deidecho_run import pixelmed_jpeg_redaction as pixelmed_mod
@@ -23,6 +26,7 @@ except ImportError:
         mask_to_redaction_rectangles,
         pixelmed_bridge_available,
         redact_baseline_jpeg_bytes_pixelmed,
+        redact_jpeg_frames_with_pixelmed,
     )
 
 
@@ -109,6 +113,79 @@ class TestPixelMedJavaBridge(unittest.TestCase):
 
 
 class TestPixelMedDiagnostics(unittest.TestCase):
+    def test_redact_jpeg_frames_with_pixelmed_sets_memory_and_thread_flags(self):
+        frame = b"\xff\xd8\xff\xd9"
+        response = (
+            b"PMJR1"
+            + struct.pack(">i", 1)
+            + struct.pack(">i", len(frame))
+            + frame
+        )
+        completed = SimpleNamespace(returncode=0, stdout=response, stderr=b"")
+
+        with patch.object(
+            pixelmed_mod, "resolve_pixelmed_codec_jar", return_value=Path("/tmp/pixelmed_codec.jar")
+        ), patch.object(
+            pixelmed_mod, "_resolve_executable", return_value="/usr/bin/java"
+        ), patch.object(
+            pixelmed_mod, "compile_pixelmed_bridge", return_value=Path("/tmp/classes")
+        ), patch.object(
+            pixelmed_mod.subprocess, "run", return_value=completed
+        ) as run_mock:
+            out = redact_jpeg_frames_with_pixelmed(
+                [frame],
+                [[]],
+                java_xmx="256m",
+            )
+
+        self.assertEqual(out, [frame])
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("-Xmx256m", cmd)
+        self.assertIn("-XX:ActiveProcessorCount=1", cmd)
+        self.assertIn("-Xss512k", cmd)
+
+    def test_pixelmed_dicom_helper_batches_frames(self):
+        class _FakeOut:
+            def __init__(self):
+                self.PixelData = b""
+                self.pixel_elem = SimpleNamespace(is_undefined_length=False)
+
+            def __getitem__(self, key):
+                return self.pixel_elem
+
+        class _FakeDs:
+            PixelData = b"ignored"
+            NumberOfFrames = "5"
+
+            def copy(self):
+                return _FakeOut()
+
+        calls = []
+
+        def fake_redact(frames, rectangles, **kwargs):
+            calls.append((list(frames), list(rectangles), kwargs))
+            return list(frames)
+
+        with patch.object(
+            pixelmed_mod,
+            "generate_frames",
+            return_value=iter([b"a", b"b", b"c", b"d", b"e"]),
+        ), patch.object(
+            pixelmed_mod, "encapsulate", return_value=b"encapsulated"
+        ), patch.object(
+            pixelmed_mod, "redact_jpeg_frames_with_pixelmed", side_effect=fake_redact
+        ):
+            out = pixelmed_mod.redact_encapsulated_baseline_jpeg_frames_pixelmed(
+                _FakeDs(),
+                [[], [], [], [], []],
+                frame_batch_size=2,
+                java_xmx="384m",
+            )
+
+        self.assertEqual(out.PixelData, b"encapsulated")
+        self.assertEqual([len(call[0]) for call in calls], [2, 2, 1])
+        self.assertTrue(all(call[2]["java_xmx"] == "384m" for call in calls))
+
     def test_inspect_pixelmed_runtime_reports_missing_java(self):
         with patch.object(
             pixelmed_mod, "resolve_pixelmed_codec_jar", return_value=Path("/tmp/pixelmed_codec.jar")

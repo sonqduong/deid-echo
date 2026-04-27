@@ -79,6 +79,12 @@ def _make_dataset(tsuid):
     )
 
 
+def _fake_clean_pixel_data_to_file(_dicom_file, _results, output_file, **_kwargs):
+    Path(output_file).write_bytes(b"pixel")
+    _FakeCleaner.clean_called = True
+    return str(output_file)
+
+
 class TestRunEchoDeidBufferOverride(unittest.TestCase):
     def setUp(self):
         _FakeCleaner.detect_calls = []
@@ -134,10 +140,16 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
             log_dir.mkdir()
 
             parser = _FakeParser("ignored", dicom=ds)
-            with patch.object(run_echodeid, "DicomParser", return_value=parser), patch.object(
+            with patch.object(run_echodeid, "read_dicom_metadata", return_value=ds), patch.object(
+                run_echodeid, "DicomParser", return_value=parser
+            ), patch.object(
                 run_echodeid, "DicomCleaner", _FakeCleaner
             ), patch.object(
                 run_echodeid, "extract_region_spatial_formats", return_value=[1]
+            ), patch.object(
+                run_echodeid,
+                "clean_pixel_data_to_file",
+                side_effect=_fake_clean_pixel_data_to_file,
             ), patch.object(
                 run_echodeid, "append_row_to_worker_csv"
             ), patch.object(
@@ -163,6 +175,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
         self.assertEqual(_FakeCleaner.detect_calls[0]["buffer_pct"], 0.25)
         self.assertTrue(_FakeCleaner.clean_called)
         self.assertEqual(row["status"], "success")
+        self.assertIn("/deidentified/", row["header_path"])
 
     def test_process_one_uses_cli_override_for_jpeg_baseline_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -173,10 +186,16 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
             log_dir.mkdir()
 
             parser = _FakeParser("ignored", dicom=ds)
-            with patch.object(run_echodeid, "DicomParser", return_value=parser), patch.object(
+            with patch.object(run_echodeid, "read_dicom_metadata", return_value=ds), patch.object(
+                run_echodeid, "DicomParser", return_value=parser
+            ), patch.object(
                 run_echodeid, "DicomCleaner", _FakeCleaner
             ), patch.object(
                 run_echodeid, "extract_region_spatial_formats", return_value=[1]
+            ), patch.object(
+                run_echodeid,
+                "clean_pixel_data_to_file",
+                side_effect=_fake_clean_pixel_data_to_file,
             ), patch.object(
                 run_echodeid, "append_row_to_worker_csv"
             ), patch.object(
@@ -213,7 +232,9 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
             log_dir.mkdir()
 
             parser = _FakeParser("ignored", dicom=ds)
-            with patch.object(run_echodeid, "DicomParser", return_value=parser), patch.object(
+            with patch.object(run_echodeid, "read_dicom_metadata", return_value=ds), patch.object(
+                run_echodeid, "DicomParser", return_value=parser
+            ), patch.object(
                 run_echodeid, "DicomCleaner", _FakeCleaner
             ), patch.object(
                 run_echodeid, "extract_region_spatial_formats", return_value=[1]
@@ -255,10 +276,16 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
             log_dir.mkdir()
 
             parser = _FakeParser("ignored", dicom=ds)
-            with patch.object(run_echodeid, "DicomParser", return_value=parser), patch.object(
+            with patch.object(run_echodeid, "read_dicom_metadata", return_value=ds), patch.object(
+                run_echodeid, "DicomParser", return_value=parser
+            ), patch.object(
                 run_echodeid, "DicomCleaner", _FakeCleaner
             ), patch.object(
                 run_echodeid, "extract_region_spatial_formats", return_value=[1]
+            ), patch.object(
+                run_echodeid,
+                "clean_pixel_data_to_file",
+                side_effect=_fake_clean_pixel_data_to_file,
             ), patch.object(
                 run_echodeid, "append_row_to_worker_csv"
             ), patch.object(
@@ -282,6 +309,41 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                 )
 
         self.assertEqual(_FakeCleaner.detect_calls[0]["buffer_pct"], 0.77)
+
+    def test_process_one_skips_disallowed_sop_before_full_parser_read(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ds = _make_dataset("1.2.840.10008.1.2.1")
+            ds.SOPClassUID = "9.9.9"
+            out_root = Path(tmpdir) / "out"
+            log_dir = Path(tmpdir) / "logs"
+            out_root.mkdir()
+            log_dir.mkdir()
+
+            with patch.object(
+                run_echodeid, "read_dicom_metadata", return_value=ds
+            ), patch.object(
+                run_echodeid,
+                "DicomParser",
+                side_effect=AssertionError("full parser should not run for skipped SOP"),
+            ), patch.object(
+                run_echodeid, "append_row_to_worker_csv"
+            ):
+                row = run_echodeid.process_one(
+                    "input.dcm",
+                    0,
+                    tmpdir,
+                    str(out_root),
+                    "/tmp/recipe",
+                    str(log_dir),
+                    run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
+                    None,
+                    run_echodeid.ALLOWED_SOP,
+                    run_echodeid.ALLOWED_RSF,
+                    run_echodeid.TRAITS,
+                    run_echodeid.FINAL_COLUMNS,
+                )
+
+        self.assertEqual(row["status"], "skipped_disallowed_sop")
 
 
 if __name__ == "__main__":

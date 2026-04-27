@@ -4,11 +4,8 @@ __license__ = "MIT"
 
 import re
 from collections import defaultdict
-from contextlib import contextmanager
 from copy import deepcopy
-from functools import cache
 
-from pydicom import FileDataset
 from pydicom.dataelem import DataElement
 from pydicom.dataset import Dataset, FileMetaDataset, RawDataElement
 from pydicom.sequence import Sequence
@@ -413,23 +410,6 @@ class FieldsWithLookups:
         del self.fields[uid]
 
 
-@contextmanager
-def override_attr(obj, attr, value):
-    """
-    Temporarily override an attribute of an object.
-    """
-    attribute_undefined = not hasattr(obj, attr)
-    try:
-        original_value = getattr(obj, attr, None)
-        setattr(obj, attr, value)
-        yield
-    finally:
-        if attribute_undefined:
-            delattr(obj, attr)
-        else:
-            setattr(obj, attr, original_value)
-
-
 def get_fields_with_lookup(dicom, skip=None, expand_sequences=True, seen=None):
     """Expand all dicom fields into a list, along with lookup tables keyed on
     different field properties.
@@ -437,26 +417,18 @@ def get_fields_with_lookup(dicom, skip=None, expand_sequences=True, seen=None):
     Each entry is a DicomField. If we find a sequence, we unwrap it and
     represent the location with the name (e.g., Sequence__Child)
     """
-    # NOTE: this hashing function is required to enable caching on
-    # `get_fields_inner`. While it is not ideal to override the hashing
-    # behavior of the PyDicom FileDataset class, it appears to be the
-    # only way to enable the use of caching without incurring significant
-    # performance overhead. Note that adding a proxy class around this
-    # decreases performance substantially (50% slowdown measured).
-    with override_attr(FileDataset, "__hash__", lambda self: id(self)):
-        fields, new_seen, new_skip = _get_fields_inner(
-            dicom,
-            skip=tuple(skip) if skip else None,
-            expand_sequences=expand_sequences,
-            seen=tuple(seen) if seen else None,
-        )
-        skip = new_skip
-        seen = new_seen
+    fields, new_seen, new_skip = _get_fields_inner(
+        dicom,
+        skip=tuple(skip) if skip else None,
+        expand_sequences=expand_sequences,
+        seen=tuple(seen) if seen else None,
+    )
+    skip = new_skip
+    seen = new_seen
 
-        return FieldsWithLookups(fields)
+    return FieldsWithLookups(fields)
 
 
-@cache
 def _get_fields_inner(dicom, skip=None, expand_sequences=True, seen=None):
     skip = list(skip) if skip else []
     seen = list(seen) if seen else []

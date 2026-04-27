@@ -1,5 +1,8 @@
 import argparse
+import csv
+import gc
 import hashlib
+import json
 import multiprocessing as mp
 import os
 import platform
@@ -42,7 +45,11 @@ except ImportError:
     )
 
 from deid.dicom.parser import DicomParser
-from deid.dicom.pixels.clean import DicomCleaner, build_mask_from_results
+from deid.dicom.pixels.clean import (
+    DicomCleaner,
+    build_mask_from_results,
+    clean_pixel_data_to_file,
+)
 
 try:
     from jpeg_selective_redaction import (
@@ -72,6 +79,7 @@ except ImportError:
 JPEG_BASELINE_TSUID = "1.2.840.10008.1.2.4.50"
 _JPEG_REDACTION_PLAN_CACHE: Dict[Tuple[Any, ...], Any] = {}
 _PIXELMED_AUTO_UNAVAILABLE_ERROR: str = ""
+_PIXELMED_SEMAPHORE = None
 
 JPEG_BASELINE_BACKEND_AUTO = "auto"
 JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED = "require-pixelmed"
@@ -302,20 +310,27 @@ def assess_jpeg_baseline_backend(backend: str) -> Dict[str, Any]:
 
 
 # recycle workers every N tasks to limit memory bloat
-MAX_TASKS_PER_CHILD = 500
+MAX_TASKS_PER_CHILD = 50
 
 CHUNKSIZE = 8  # used by Pool.imap_unordered; higher values improve plan-cache locality
+DEFAULT_PIXELMED_FRAME_BATCH_SIZE = 16
+DEFAULT_PIXELMED_JAVA_XMX = "512m"
+DEFAULT_DICOM_DEFER_SIZE = "1 MB"
+INPUT_MANIFEST_TSV = "input_manifest.tsv"
+INPUT_MANIFEST_META_JSON = "input_manifest.meta.json"
 
 
 def worker_log_path(log_dir: Path, worker_id: int) -> Path:
     return log_dir / f"deid_header_pixel_log__worker_{worker_id:03d}.csv"
 
 
-def _init_worker() -> None:
+def _init_worker(pixelmed_semaphore=None) -> None:
     """
     Runs once per worker process (and again when a worker is recycled).
     Good place to cap hidden thread pools and reduce memory/CPU contention.
     """
+    global _PIXELMED_SEMAPHORE
+    _PIXELMED_SEMAPHORE = pixelmed_semaphore
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -422,6 +437,10 @@ def read_transfer_syntax_uid(dcm_path: Path) -> str:
         return ""
 
 
+def read_dicom_metadata(dcm_path: Path):
+    return pydicom.dcmread(str(dcm_path), stop_before_pixels=True, force=True)
+
+
 def _format_elapsed(start_ts: float) -> str:
     return f"{time.perf_counter() - start_ts:.6f}"
 
@@ -430,6 +449,9 @@ def jpeg_baseline_redact_overwrite_inplace(
     dcm_path: Path,
     results: Dict[str, Any],
     jpeg_baseline_backend: str,
+    *,
+    frame_batch_size: int = DEFAULT_PIXELMED_FRAME_BATCH_SIZE,
+    java_xmx: str = DEFAULT_PIXELMED_JAVA_XMX,
 ) -> Tuple[bool, str, str]:
     """
     Redact JPEG Baseline encapsulated pixel data without decompressing.
@@ -468,9 +490,18 @@ def jpeg_baseline_redact_overwrite_inplace(
             )
         else:
             try:
-                redacted = redact_encapsulated_baseline_jpeg_frames_pixelmed(
-                    ds, frame_rectangles
-                )
+                if _PIXELMED_SEMAPHORE is not None:
+                    _PIXELMED_SEMAPHORE.acquire()
+                try:
+                    redacted = redact_encapsulated_baseline_jpeg_frames_pixelmed(
+                        ds,
+                        frame_rectangles,
+                        frame_batch_size=frame_batch_size,
+                        java_xmx=java_xmx,
+                    )
+                finally:
+                    if _PIXELMED_SEMAPHORE is not None:
+                        _PIXELMED_SEMAPHORE.release()
                 redacted.save_as(str(dcm_path))
                 return True, "", "pixelmed_jpeg_baseline"
             except PixelMedUnavailableError as e:
@@ -516,23 +547,158 @@ def discover_dicom_files(input_root: Path) -> List[Path]:
     return sorted(p for p in input_root.rglob("*") if p.is_file())
 
 
+def _manifest_paths(log_dir: Path) -> Tuple[Path, Path]:
+    return log_dir / INPUT_MANIFEST_TSV, log_dir / INPUT_MANIFEST_META_JSON
+
+
+def _manifest_subsample_value(subsample: Optional[int]) -> Optional[int]:
+    return int(subsample) if subsample is not None and int(subsample) > 0 else None
+
+
+def write_input_manifest(
+    dcm_files: List[Path],
+    *,
+    input_root: Path,
+    log_dir: Path,
+    subsample: Optional[int],
+    total_files: int,
+) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path, meta_path = _manifest_paths(log_dir)
+    tmp_manifest = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    tmp_meta = meta_path.with_suffix(meta_path.suffix + ".tmp")
+
+    with open(tmp_manifest, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(["src_path"])
+        for path in dcm_files:
+            writer.writerow([str(path)])
+
+    meta = {
+        "complete": True,
+        "created_at": _metrics_ts(),
+        "input_root": str(input_root.resolve()),
+        "subsample": _manifest_subsample_value(subsample),
+        "total_files": int(total_files),
+        "file_count": len(dcm_files),
+    }
+    with open(tmp_meta, "w", encoding="utf-8") as f:
+        json.dump(meta, f, sort_keys=True, indent=2)
+        f.write("\n")
+
+    tmp_manifest.replace(manifest_path)
+    tmp_meta.replace(meta_path)
+
+
+def load_input_manifest(
+    *,
+    input_root: Path,
+    log_dir: Path,
+    subsample: Optional[int],
+) -> Optional[Tuple[List[Path], int]]:
+    manifest_path, meta_path = _manifest_paths(log_dir)
+    if not manifest_path.is_file() or not meta_path.is_file():
+        return None
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if not meta.get("complete"):
+            return None
+        if meta.get("input_root") != str(input_root.resolve()):
+            return None
+        if meta.get("subsample") != _manifest_subsample_value(subsample):
+            return None
+
+        paths: List[Path] = []
+        with open(manifest_path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            if not reader.fieldnames or "src_path" not in reader.fieldnames:
+                return None
+            for row in reader:
+                src = (row.get("src_path") or "").strip()
+                if src:
+                    paths.append(Path(src))
+
+        if len(paths) != int(meta.get("file_count", -1)):
+            return None
+        return paths, int(meta.get("total_files", len(paths)))
+    except Exception:
+        return None
+
+
 def prepare_todo_files(
-    input_root: Path, log_dir: Path, subsample: Optional[int] = None
+    input_root: Path,
+    log_dir: Path,
+    subsample: Optional[int] = None,
+    *,
+    refresh_file_list: bool = False,
 ) -> Tuple[List[Path], int, Set[str], List[str]]:
     """
-    Discover input files, optionally subsample, and apply resume filtering.
+    Discover or load input files, optionally subsample, and apply resume filtering.
     """
-    dcm_files = discover_dicom_files(input_root)
-    total_files = len(dcm_files)
+    manifest = None if refresh_file_list else load_input_manifest(
+        input_root=input_root,
+        log_dir=log_dir,
+        subsample=subsample,
+    )
+    if manifest is not None:
+        dcm_files, total_files = manifest
+    else:
+        dcm_files = discover_dicom_files(input_root)
+        total_files = len(dcm_files)
 
-    if subsample is not None and subsample > 0:
-        n = min(subsample, total_files)
-        dcm_files = random.sample(dcm_files, n)
-        dcm_files = sorted(dcm_files)
+        if subsample is not None and subsample > 0:
+            n = min(subsample, total_files)
+            dcm_files = random.sample(dcm_files, n)
+            dcm_files = sorted(dcm_files)
+
+        write_input_manifest(
+            dcm_files,
+            input_root=input_root,
+            log_dir=log_dir,
+            subsample=subsample,
+            total_files=total_files,
+        )
 
     done_src = load_done_src_paths_from_worker_logs(log_dir)
     todo = [str(p) for p in dcm_files if str(p) not in done_src]
     return dcm_files, total_files, done_src, todo
+
+
+def iter_task_args(
+    todo: List[str],
+    *,
+    n_workers: int,
+    input_root: Path,
+    output_root: Path,
+    recipe_path: Path,
+    log_dir: Path,
+    jpeg_baseline_backend: str,
+    buffer_pct: Optional[float],
+    pixelmed_frame_batch_size: int,
+    pixelmed_java_xmx: str,
+    dicom_defer_size: Optional[str],
+):
+    for idx, path_str in enumerate(todo):
+        worker_id = idx % n_workers
+        yield (
+            path_str,
+            worker_id,
+            str(input_root),
+            str(output_root),
+            str(recipe_path),
+            str(log_dir),
+            jpeg_baseline_backend,
+            buffer_pct,
+            ALLOWED_SOP,
+            ALLOWED_RSF,
+            TRAITS,
+            FINAL_COLUMNS,
+            pixelmed_frame_batch_size,
+            pixelmed_java_xmx,
+            dicom_defer_size,
+        )
 
 
 def process_one(
@@ -548,6 +714,9 @@ def process_one(
     allowed_rsf: Set[int],
     traits: List,
     final_columns: List[str],
+    pixelmed_frame_batch_size: int = DEFAULT_PIXELMED_FRAME_BATCH_SIZE,
+    pixelmed_java_xmx: str = DEFAULT_PIXELMED_JAVA_XMX,
+    dicom_defer_size: Optional[str] = DEFAULT_DICOM_DEFER_SIZE,
 ) -> Dict[str, Any]:
     """
     Runs in worker process; appends exactly one row to its worker CSV.
@@ -555,6 +724,7 @@ def process_one(
     dcm_path = Path(dcm_path_str)
     INPUT_ROOT_ = Path(input_root)
     OUTPUT_ROOT_ = Path(output_root)
+    DEIDENTIFIED_ROOT_ = OUTPUT_ROOT_ / "deidentified"
     RECIPE_PATH_ = Path(recipe_path)
     LOG_DIR_ = Path(log_dir)
 
@@ -595,10 +765,9 @@ def process_one(
 
     out_csv = worker_log_path(LOG_DIR_, worker_id)
 
-    # --- READ ORIGINAL ---
+    # --- READ ORIGINAL METADATA ONLY ---
     try:
-        parser = DicomParser(str(dcm_path), recipe=str(RECIPE_PATH_))
-        ds = parser.dicom
+        ds = read_dicom_metadata(dcm_path)
     except Exception as e:
         row.update({"status": "read_error", "error": repr(e)})
         append_row_to_worker_csv(row, out_csv, final_columns)
@@ -679,6 +848,18 @@ def process_one(
         append_row_to_worker_csv(row, out_csv, final_columns)
         return row
 
+    # --- FULL HEADER PARSE ---
+    try:
+        parser = DicomParser(
+            str(dcm_path),
+            recipe=str(RECIPE_PATH_),
+            defer_size=dicom_defer_size,
+        )
+    except Exception as e:
+        row.update({"status": "read_error", "error": repr(e)})
+        append_row_to_worker_csv(row, out_csv, final_columns)
+        return row
+
     # --- HEADER PARSE ---
     try:
         parser.parse(remove_private=True)
@@ -717,7 +898,12 @@ def process_one(
             fmt5(inst_num_int) if inst_num_int is not None else sop_instance_uid
         )
 
-        out_dir = OUTPUT_ROOT_ / hashed_patient_id / hashed_study_uid / series_part
+        out_dir = (
+            DEIDENTIFIED_ROOT_
+            / hashed_patient_id
+            / hashed_study_uid
+            / series_part
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
 
         base_name = f"{instance_part}.dcm"
@@ -736,6 +922,8 @@ def process_one(
                 "instance_filename": base_name,
             }
         )
+        del parser, ds_after, ds
+        gc.collect()
 
     except Exception as e:
         row.update(
@@ -847,6 +1035,8 @@ def process_one(
                     header_cleaned_path,
                     cleaner.results,
                     jpeg_baseline_backend,
+                    frame_batch_size=pixelmed_frame_batch_size,
+                    java_xmx=pixelmed_java_xmx,
                 )
             except Exception as e:
                 fast_ok = False
@@ -910,12 +1100,14 @@ def process_one(
             row["pixel_redaction_method"] = "decompressed_fallback"
 
         clean_start = time.perf_counter()
-        cleaner.clean()
+        pixel_cleaned = clean_pixel_data_to_file(
+            str(header_cleaned_path),
+            cleaner.results,
+            str(header_cleaned_path),
+            jpeg_ls=True,
+        )
         row["clean_s"] = _format_elapsed(clean_start)
-
-        save_start = time.perf_counter()
-        pixel_cleaned = cleaner.save_dicom(filename=base_name, jpeg_ls=True)
-        row["save_s"] = _format_elapsed(save_start)
+        row["save_s"] = "0.000000"
         pixel_path = Path(pixel_cleaned)
 
         pixel_success = bool(pixel_path.is_file())
@@ -1012,7 +1204,8 @@ def _process_one_star(args_tuple):
     """
     Helper for multiprocessing.Pool: unpack args and call process_one.
     """
-    return process_one(*args_tuple)
+    row = process_one(*args_tuple)
+    return row.get("status", "")
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -1061,6 +1254,39 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Multiprocessing chunk size. Higher values improve JPEG plan-cache reuse.",
     )
     ap.add_argument(
+        "--max-tasks-per-child",
+        type=int,
+        default=MAX_TASKS_PER_CHILD,
+        help="Recycle each worker after this many files to bound per-process memory growth.",
+    )
+    ap.add_argument(
+        "--refresh-file-list",
+        action="store_true",
+        help="Ignore any saved input manifest and walk the input directory again.",
+    )
+    ap.add_argument(
+        "--pixelmed-concurrency",
+        type=int,
+        default=None,
+        help="Maximum concurrent PixelMed JVM redactions. Defaults to min(4, workers).",
+    )
+    ap.add_argument(
+        "--pixelmed-frame-batch-size",
+        type=int,
+        default=DEFAULT_PIXELMED_FRAME_BATCH_SIZE,
+        help="Number of frames sent to each PixelMed JVM invocation.",
+    )
+    ap.add_argument(
+        "--pixelmed-java-xmx",
+        default=DEFAULT_PIXELMED_JAVA_XMX,
+        help="Java heap cap for each PixelMed JVM, e.g. 512m or 1g.",
+    )
+    ap.add_argument(
+        "--dicom-defer-size",
+        default=DEFAULT_DICOM_DEFER_SIZE,
+        help="pydicom defer_size for full header parse reads.",
+    )
+    ap.add_argument(
         "--jpeg-baseline-backend",
         choices=JPEG_BASELINE_BACKEND_CHOICES,
         default=JPEG_BASELINE_BACKEND_AUTO,
@@ -1086,6 +1312,8 @@ def main() -> None:
     args.jpeg_baseline_backend = validate_jpeg_baseline_backend(
         args.jpeg_baseline_backend
     )
+    args.max_tasks_per_child = max(1, int(args.max_tasks_per_child))
+    args.pixelmed_frame_batch_size = max(1, int(args.pixelmed_frame_batch_size))
 
     # ---------------- ENV ----------------
     if args.salt:
@@ -1104,6 +1332,8 @@ def main() -> None:
     RECIPE_PATH = args.recipe_path
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    DEIDENTIFIED_ROOT = OUTPUT_ROOT / "deidentified"
+    DEIDENTIFIED_ROOT.mkdir(parents=True, exist_ok=True)
     LOG_DIR = OUTPUT_ROOT / "logs"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     MASTER_LOG_CSV = OUTPUT_ROOT / "deid_log.csv"
@@ -1143,7 +1373,10 @@ def main() -> None:
 
     # ---------------- DISCOVER FILES ----------------
     dcm_files, total_files, done_src, todo = prepare_todo_files(
-        INPUT_ROOT, LOG_DIR, args.subsample
+        INPUT_ROOT,
+        LOG_DIR,
+        args.subsample,
+        refresh_file_list=args.refresh_file_list,
     )
     if total_files == 0:
         print(f"[NOTE] No files found under {INPUT_ROOT}")
@@ -1161,9 +1394,16 @@ def main() -> None:
     # ---------------- RUN PARALLEL  ----------------
     start_method = "spawn" if platform.system().lower().startswith("win") else "fork"
     ctx = mp.get_context(start_method)
-    tasks = []
-    n_workers = int(args.workers)
+    n_workers = max(1, int(args.workers))
     chunksize = max(1, int(args.chunksize))
+    flush_every = max(1, int(args.flush_every))
+    pixelmed_concurrency = (
+        min(4, n_workers)
+        if args.pixelmed_concurrency is None
+        else max(1, int(args.pixelmed_concurrency))
+    )
+    pixelmed_concurrency = min(pixelmed_concurrency, n_workers)
+    pixelmed_semaphore = ctx.BoundedSemaphore(pixelmed_concurrency)
 
     # --- WRITE METRICS HEADER (RUN CONFIG) ---
     with open(METRICS_TXT, "w", encoding="utf-8") as f:
@@ -1171,6 +1411,13 @@ def main() -> None:
         f.write(f"# start_time: {_metrics_ts()}\n")
         f.write(f"# workers: {n_workers}\n")
         f.write(f"# chunksize: {chunksize}\n")
+        f.write(f"# max_tasks_per_child: {args.max_tasks_per_child}\n")
+        f.write(f"# deidentified_root: {DEIDENTIFIED_ROOT}\n")
+        f.write(f"# refresh_file_list: {args.refresh_file_list}\n")
+        f.write(f"# pixelmed_concurrency: {pixelmed_concurrency}\n")
+        f.write(f"# pixelmed_frame_batch_size: {args.pixelmed_frame_batch_size}\n")
+        f.write(f"# pixelmed_java_xmx: {args.pixelmed_java_xmx}\n")
+        f.write(f"# dicom_defer_size: {args.dicom_defer_size}\n")
         f.write(f"# jpeg_baseline_backend: {args.jpeg_baseline_backend}\n")
         f.write(f"# pixelmed_status: {jpeg_backend_status['status']}\n")
         f.write(f"# pixelmed_message: {jpeg_backend_status['message']}\n")
@@ -1179,7 +1426,7 @@ def main() -> None:
             if value:
                 f.write(f"# pixelmed_{key}: {value}\n")
         f.write(f"# multiprocessing_method: {ctx.get_start_method()}\n")
-        f.write(f"# maxtasksperchild: {MAX_TASKS_PER_CHILD}\n")
+        f.write(f"# maxtasksperchild: {args.max_tasks_per_child}\n")
         f.write("# -----------------------------------------\n")
         f.write("timestamp\tcompleted/total\telapsed_s\tavg_fps\tinterval_fps\n")
 
@@ -1236,38 +1483,33 @@ def main() -> None:
 
         raise SystemExit(0)
 
-    for idx, path_str in enumerate(todo):
-        worker_id = idx % n_workers
-        tasks.append(
-            (
-                path_str,
-                worker_id,
-                str(INPUT_ROOT),
-                str(OUTPUT_ROOT),
-                str(RECIPE_PATH),
-                str(LOG_DIR),
-                args.jpeg_baseline_backend,
-                args.buffer_pct,
-                ALLOWED_SOP,
-                ALLOWED_RSF,
-                TRAITS,
-                FINAL_COLUMNS,
-            )
-        )
-
     try:
+        task_iter = iter_task_args(
+            todo,
+            n_workers=n_workers,
+            input_root=INPUT_ROOT,
+            output_root=OUTPUT_ROOT,
+            recipe_path=RECIPE_PATH,
+            log_dir=LOG_DIR,
+            jpeg_baseline_backend=args.jpeg_baseline_backend,
+            buffer_pct=args.buffer_pct,
+            pixelmed_frame_batch_size=args.pixelmed_frame_batch_size,
+            pixelmed_java_xmx=args.pixelmed_java_xmx,
+            dicom_defer_size=args.dicom_defer_size,
+        )
         with ctx.Pool(
             processes=n_workers,
             initializer=_init_worker,
-            maxtasksperchild=MAX_TASKS_PER_CHILD,
+            initargs=(pixelmed_semaphore,),
+            maxtasksperchild=args.max_tasks_per_child,
         ) as pool:
             for _ in pool.imap_unordered(
-                _process_one_star, tasks, chunksize=chunksize
+                _process_one_star, task_iter, chunksize=chunksize
             ):
                 completed += 1
                 interval_completed += 1
 
-                if completed % int(args.flush_every) == 0:
+                if completed % flush_every == 0:
                     now_ts = time.time()
                     elapsed_total = now_ts - run_start_ts
                     avg_fps = (completed / elapsed_total) if elapsed_total > 0 else 0.0

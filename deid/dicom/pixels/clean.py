@@ -116,6 +116,205 @@ def _mask_view_for_pixels(
     raise ValueError(f"Unsupported pixel array shape for masking: {original.shape}")
 
 
+def _pixel_array_for_cleaning(
+    dicom,
+    *,
+    fix_interpretation: bool,
+    pixel_data_attribute: str,
+) -> Tuple[NDArray, int]:
+    pixel_data = getattr(dicom, pixel_data_attribute)
+
+    # Get expected and actual length of the pixel data (bytes, expected does not include trailing null byte)
+    expected_length = get_expected_length(dicom)
+    actual_length = len(pixel_data)
+    full_length = expected_length / 2 * 3  # upsampled data is a third larger
+    full_length += 1 if full_length % 2 else 0  # trailing padding byte if even length
+
+    # If we have YBR_FULL_2, must be RGB to obtain pixel data
+    if (
+        not dicom.file_meta.TransferSyntaxUID.is_compressed
+        and dicom.PhotometricInterpretation == "YBR_FULL_422"
+        and fix_interpretation
+        and actual_length >= full_length
+    ):
+        bot.warning(
+            "Updating dicom.PhotometricInterpretation to RGB, set fix_interpretation to False to skip."
+        )
+        photometric_original = dicom.PhotometricInterpretation
+        dicom.PhotometricInterpretation = "RGB"
+        original = dicom.pixel_array
+        dicom.PhotometricInterpretation = photometric_original
+    else:
+        original = dicom.pixel_array
+
+    # ---- local PI/SPP (do not rely on header after conversions) ----
+    spp = int(getattr(dicom, "SamplesPerPixel", 1) or 1)
+    pi = str(getattr(dicom, "PhotometricInterpretation", "") or "")
+
+    # ---- PALETTE COLOR -> RGB (before masking) ----
+    if fix_interpretation and pi == "PALETTE COLOR":
+        try:
+            # If already RGB-like, do nothing (but update local spp)
+            if (
+                isinstance(original, numpy.ndarray)
+                and original.ndim >= 3
+                and original.shape[-1] == 3
+            ):
+                spp = 3
+            else:
+                # Single-frame indexed: (rows, cols) -> (rows, cols, 3)
+                if isinstance(original, numpy.ndarray) and original.ndim == 2:
+                    original = apply_color_lut(original, dicom)
+                    spp = 3
+
+                # Multi-frame indexed cine: (frames, rows, cols) -> (frames, rows, cols, 3)
+                elif (
+                    isinstance(original, numpy.ndarray)
+                    and original.ndim == 3
+                    and spp == 1
+                ):
+                    rgb_frames = [
+                        apply_color_lut(original[f], dicom)
+                        for f in range(original.shape[0])
+                    ]
+                    original = numpy.stack(rgb_frames, axis=0)
+                    spp = 3
+                else:
+                    bot.warning(
+                        f"PALETTE COLOR unexpected pixel_array shape={getattr(original,'shape',None)}; proceeding without LUT."
+                    )
+            bot.warning("Converted PALETTE COLOR -> RGB for masking.")
+        except Exception as e:
+            bot.warning(
+                f"Failed PALETTE COLOR -> RGB conversion; proceeding without LUT. err={e!r}"
+            )
+
+    return original, spp
+
+
+def _apply_mask_to_pixel_array(
+    original: NDArray,
+    results: dict,
+    samples_per_pixel: int,
+    *,
+    in_place: bool,
+) -> Optional[NDArray]:
+    mask_rows, mask_columns = _mask_shape_from_pixel_array(original, samples_per_pixel)
+    mask = build_mask_from_results(results, mask_rows, mask_columns)
+
+    if len(original.shape) not in (2, 3, 4):
+        bot.warning(
+            "Pixel array dimension %s is not recognized." % (str(original.shape))
+        )
+        return None
+
+    cleaned = original if in_place else original.copy()
+    if in_place and hasattr(cleaned, "flags") and not cleaned.flags.writeable:
+        cleaned = original.copy()
+
+    try:
+        cleaned *= _mask_view_for_pixels(mask, original, samples_per_pixel)
+    except ValueError:
+        if not in_place:
+            raise
+        cleaned = original.copy()
+        cleaned *= _mask_view_for_pixels(mask, original, samples_per_pixel)
+    return cleaned
+
+
+def _save_cleaned_array_to_dicom(
+    dicom,
+    arr: NDArray,
+    dicom_name: str,
+    *,
+    jpeg_ls: bool,
+    orig_pi: str,
+) -> str:
+    original_ts = dicom.file_meta.TransferSyntaxUID
+    was_compressed = getattr(original_ts, "is_compressed", False)
+
+    # Decompress if needed
+    if was_compressed:
+        bot.debug(f"[clean.save] decompressing from {original_ts}")
+        dicom.decompress(generate_instance_uid=False)
+
+    # Replace PixelData as late as possible, because tobytes() makes a full copy.
+    dicom.PixelData = numpy.ascontiguousarray(arr).tobytes()
+
+    # Harmonize color/grayscale metadata
+    if arr.ndim in (3, 4) and (arr.shape[-1] == 3):  # RGB image or RGB cine
+        dicom.SamplesPerPixel = 3
+        dicom.PhotometricInterpretation = "RGB"
+        dicom.PlanarConfiguration = 0  # interleaved by pixel
+
+        # If the source used a palette LUT, remove it now that we are true RGB
+        palette_tags = [
+            "RedPaletteColorLookupTableDescriptor",
+            "GreenPaletteColorLookupTableDescriptor",
+            "BluePaletteColorLookupTableDescriptor",
+            "RedPaletteColorLookupTableData",
+            "GreenPaletteColorLookupTableData",
+            "BluePaletteColorLookupTableData",
+            "SegmentedRedPaletteColorLookupTableData",
+            "SegmentedGreenPaletteColorLookupTableData",
+            "SegmentedBluePaletteColorLookupTableData",
+            "PaletteColorLookupTableUID",
+        ]
+        for name in palette_tags:
+            if name in dicom:
+                del dicom[name]
+
+    elif arr.ndim in (
+        2,
+        3,
+    ):  # grayscale image or grayscale cine (or palette indices if not converted)
+        dicom.SamplesPerPixel = 1
+
+        # If source was PALETTE COLOR but we still have 2D/3D indexed data,
+        # DO NOT relabel as MONOCHROME2 (that destroys meaning).
+        if orig_pi == "PALETTE COLOR":
+            dicom.PhotometricInterpretation = "PALETTE COLOR"
+        else:
+            dicom.PhotometricInterpretation = "MONOCHROME2"
+
+        if "PlanarConfiguration" in dicom:
+            del dicom.PlanarConfiguration
+
+    # Align bit-depth fields to dtype (applies to RGB and grayscale)
+    if numpy.issubdtype(arr.dtype, numpy.integer):
+        bits = int(arr.dtype.itemsize * 8)  # uint8 -> 8, uint16 -> 16
+        dicom.BitsAllocated = bits
+        dicom.BitsStored = bits
+        dicom.HighBit = bits - 1
+        dicom.PixelRepresentation = (
+            1 if numpy.issubdtype(arr.dtype, numpy.signedinteger) else 0
+        )
+
+    # JPEG-LS branch or uncompressed fallback
+    if jpeg_ls:
+        try:
+            dicom.compress(_JPEGLS_LOSSLESS_UID, generate_instance_uid=False)
+            dicom.file_meta.TransferSyntaxUID = _JPEGLS_LOSSLESS_UID
+            bot.debug(
+                f"[clean.save] recompressed using JPEG-LS Lossless tsuid={_JPEGLS_LOSSLESS_UID}"
+            )
+        except NotImplementedError:
+            bot.warning(
+                "[clean.save] JPEG-LS Lossless compression not available; saving Explicit VR Little Endian."
+            )
+            dicom.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            bot.debug(
+                f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}"
+            )
+    else:
+        dicom.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        bot.debug(f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}")
+
+    dicom.save_as(dicom_name)
+    bot.debug(f"[clean.save] wrote: {dicom_name}")
+    return dicom_name
+
+
 class DicomCleaner:
     """
     Clean a dicom file of burned pixels.
@@ -318,95 +517,13 @@ class DicomCleaner:
             f"cleaned_shape={shape}"
         )
 
-        original_ts = dicom.file_meta.TransferSyntaxUID
-        was_compressed = getattr(original_ts, "is_compressed", False)
-
-        # Decompress if needed
-        if was_compressed:
-            bot.debug(f"[clean.save] decompressing from {original_ts}")
-            dicom.decompress(generate_instance_uid=False)
-
-        # Replace PixelData
-        dicom.PixelData = getattr(self, image_type).tobytes()
-
-        arr = getattr(self, image_type)
-
-        # Harmonize color/grayscale metadata
-        if arr.ndim in (3, 4) and (arr.shape[-1] == 3):  # RGB image or RGB cine
-            dicom.SamplesPerPixel = 3
-            dicom.PhotometricInterpretation = "RGB"
-            dicom.PlanarConfiguration = 0  # interleaved by pixel
-
-            # If the source used a palette LUT, remove it now that we are true RGB
-            palette_tags = [
-                "RedPaletteColorLookupTableDescriptor",
-                "GreenPaletteColorLookupTableDescriptor",
-                "BluePaletteColorLookupTableDescriptor",
-                "RedPaletteColorLookupTableData",
-                "GreenPaletteColorLookupTableData",
-                "BluePaletteColorLookupTableData",
-                "SegmentedRedPaletteColorLookupTableData",
-                "SegmentedGreenPaletteColorLookupTableData",
-                "SegmentedBluePaletteColorLookupTableData",
-                "PaletteColorLookupTableUID",
-            ]
-            for name in palette_tags:
-                if name in dicom:
-                    del dicom[name]
-
-        elif arr.ndim in (
-            2,
-            3,
-        ):  # grayscale image or grayscale cine (or palette indices if not converted)
-            dicom.SamplesPerPixel = 1
-
-            # If source was PALETTE COLOR but we still have 2D/3D indexed data,
-            # DO NOT relabel as MONOCHROME2 (that destroys meaning).
-            if orig_pi == "PALETTE COLOR":
-                dicom.PhotometricInterpretation = "PALETTE COLOR"
-            else:
-                dicom.PhotometricInterpretation = "MONOCHROME2"
-
-            if "PlanarConfiguration" in dicom:
-                del dicom.PlanarConfiguration
-
-        # Align bit-depth fields to dtype (applies to RGB and grayscale)
-        if numpy.issubdtype(arr.dtype, numpy.integer):
-            bits = int(arr.dtype.itemsize * 8)  # uint8 -> 8, uint16 -> 16
-            dicom.BitsAllocated = bits
-            dicom.BitsStored = bits
-            dicom.HighBit = bits - 1
-            dicom.PixelRepresentation = (
-                1 if numpy.issubdtype(arr.dtype, numpy.signedinteger) else 0
-            )
-
-        # JPEG-LS branch or uncompressed fallback
-        if jpeg_ls:
-            try:
-                dicom.compress(_JPEGLS_LOSSLESS_UID, generate_instance_uid=False)
-                dicom.file_meta.TransferSyntaxUID = (
-                    _JPEGLS_LOSSLESS_UID  # rewrite metadata
-                )
-                bot.debug(
-                    f"[clean.save] recompressed using JPEG-LS Lossless tsuid={_JPEGLS_LOSSLESS_UID}"
-                )
-            except NotImplementedError:
-                bot.warning(
-                    "[clean.save] JPEG-LS Lossless compression not available; saving Explicit VR Little Endian."
-                )
-                dicom.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-                bot.debug(
-                    f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}"
-                )
-        else:
-            dicom.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-            bot.debug(
-                f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}"
-            )
-
-        dicom.save_as(dicom_name)
-        bot.debug(f"[clean.save] wrote: {dicom_name}")
-        return dicom_name
+        return _save_cleaned_array_to_dicom(
+            dicom,
+            getattr(self, image_type),
+            dicom_name,
+            jpeg_ls=jpeg_ls,
+            orig_pi=orig_pi,
+        )
 
 
 def clean_pixel_data(
@@ -429,87 +546,46 @@ def clean_pixel_data(
     fix_interpretation: fix the photometric interpretation if found off
     pixel_data_attribute: PixelData attribute name in the dicom file
     """
-    cleaned = None
-
     # Load in dicom file, and image data
     dicom = utils.load_dicom(dicom_file)
-    pixel_data = getattr(dicom, pixel_data_attribute)
+    original, spp = _pixel_array_for_cleaning(
+        dicom,
+        fix_interpretation=fix_interpretation,
+        pixel_data_attribute=pixel_data_attribute,
+    )
+    return _apply_mask_to_pixel_array(original, results, spp, in_place=False)
 
-    # Get expected and actual length of the pixel data (bytes, expected does not include trailing null byte)
-    expected_length = get_expected_length(dicom)
-    actual_length = len(pixel_data)
-    full_length = expected_length / 2 * 3  # upsampled data is a third larger
-    full_length += 1 if full_length % 2 else 0  # trailing padding byte if even length
 
-    # If we have YBR_FULL_2, must be RGB to obtain pixel data
-    if (
-        not dicom.file_meta.TransferSyntaxUID.is_compressed
-        and dicom.PhotometricInterpretation == "YBR_FULL_422"
-        and fix_interpretation
-        and actual_length >= full_length
-    ):
-        bot.warning(
-            "Updating dicom.PhotometricInterpretation to RGB, set fix_interpretation to False to skip."
-        )
-        photometric_original = dicom.PhotometricInterpretation
-        dicom.PhotometricInterpretation = "RGB"
-        original = dicom.pixel_array
-        dicom.PhotometricInterpretation = photometric_original
-    else:
-        original = dicom.pixel_array
+def clean_pixel_data_to_file(
+    dicom_file,
+    results: dict,
+    output_file,
+    *,
+    jpeg_ls: bool = True,
+    force: bool = True,
+    fix_interpretation: bool = True,
+    pixel_data_attribute: str = "PixelData",
+) -> Optional[str]:
+    """
+    Clean and save a DICOM using one dataset read.
 
-    # ---- local PI/SPP (do not rely on header after conversions) ----
-    spp = int(getattr(dicom, "SamplesPerPixel", 1) or 1)
-    pi = str(getattr(dicom, "PhotometricInterpretation", "") or "")
-
-    # ---- PALETTE COLOR -> RGB (before masking) ----
-    if fix_interpretation and pi == "PALETTE COLOR":
-        try:
-            # If already RGB-like, do nothing (but update local spp)
-            if (
-                isinstance(original, numpy.ndarray)
-                and original.ndim >= 3
-                and original.shape[-1] == 3
-            ):
-                spp = 3
-            else:
-                # Single-frame indexed: (rows, cols) -> (rows, cols, 3)
-                if isinstance(original, numpy.ndarray) and original.ndim == 2:
-                    original = apply_color_lut(original, dicom)
-                    spp = 3
-
-                # Multi-frame indexed cine: (frames, rows, cols) -> (frames, rows, cols, 3)
-                elif (
-                    isinstance(original, numpy.ndarray)
-                    and original.ndim == 3
-                    and spp == 1
-                ):
-                    rgb_frames = [
-                        apply_color_lut(original[f], dicom)
-                        for f in range(original.shape[0])
-                    ]
-                    original = numpy.stack(rgb_frames, axis=0)
-                    spp = 3
-                else:
-                    bot.warning(
-                        f"PALETTE COLOR unexpected pixel_array shape={getattr(original,'shape',None)}; proceeding without LUT."
-                    )
-            bot.warning("Converted PALETTE COLOR -> RGB for masking.")
-        except Exception as e:
-            bot.warning(
-                f"Failed PALETTE COLOR -> RGB conversion; proceeding without LUT. err={e!r}"
-            )
-
-    mask_rows, mask_columns = _mask_shape_from_pixel_array(original, spp)
-    mask = build_mask_from_results(results, mask_rows, mask_columns)
-
-    # Now apply finished mask to the data
-    if len(original.shape) in (2, 3, 4):
-        cleaned = original.copy()
-        cleaned *= _mask_view_for_pixels(mask, original, spp)
-    else:
-        bot.warning(
-            "Pixel array dimension %s is not recognized." % (str(original.shape))
-        )
-
-    return cleaned
+    This is the low-memory pipeline path: decode pixels, mask in place when the
+    decoder provides a writeable array, assign PixelData late, then save.
+    """
+    dicom = utils.load_dicom(dicom_file, force=force)
+    orig_pi = str(getattr(dicom, "PhotometricInterpretation", "") or "")
+    original, spp = _pixel_array_for_cleaning(
+        dicom,
+        fix_interpretation=fix_interpretation,
+        pixel_data_attribute=pixel_data_attribute,
+    )
+    cleaned = _apply_mask_to_pixel_array(original, results, spp, in_place=True)
+    if cleaned is None:
+        return None
+    return _save_cleaned_array_to_dicom(
+        dicom,
+        cleaned,
+        str(output_file),
+        jpeg_ls=jpeg_ls,
+        orig_pi=orig_pi,
+    )
