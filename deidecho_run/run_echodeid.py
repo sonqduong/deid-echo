@@ -170,7 +170,7 @@ FINAL_COLUMNS = [
 ]
 
 # ---------------- Dictionary of Top Mask overrides beyond upper bounding box ----------------
-# Keyed by (Manufacturer, ManufacturerModelName), defaults to 1%
+# Keyed by (Manufacturer, ManufacturerModelName), defaults to 0%
 
 BUFFER_PCT_DEFAULT = 0.00
 
@@ -256,6 +256,21 @@ def validate_jpeg_baseline_backend(backend: str) -> str:
     return value
 
 
+def resolve_pixelmed_concurrency(
+    requested_concurrency: Optional[int], n_workers: int
+) -> int:
+    """
+    Resolve PixelMed JVM concurrency for the current worker pool.
+
+    If not provided on the CLI, default to all workers. Explicit values are
+    clamped to the valid range of 1..n_workers.
+    """
+    worker_count = max(1, int(n_workers))
+    if requested_concurrency is None:
+        return worker_count
+    return min(max(1, int(requested_concurrency)), worker_count)
+
+
 def assess_jpeg_baseline_backend(backend: str) -> Dict[str, Any]:
     """
     Resolve startup behavior and diagnostics for the selected JPEG backend.
@@ -313,7 +328,7 @@ def assess_jpeg_baseline_backend(backend: str) -> Dict[str, Any]:
 MAX_TASKS_PER_CHILD = 50
 
 CHUNKSIZE = 8  # used by Pool.imap_unordered; higher values improve plan-cache locality
-DEFAULT_PIXELMED_FRAME_BATCH_SIZE = 16
+DEFAULT_PIXELMED_FRAME_BATCH_SIZE = 32
 DEFAULT_PIXELMED_JAVA_XMX = "512m"
 DEFAULT_DICOM_DEFER_SIZE = "1 MB"
 INPUT_MANIFEST_TSV = "input_manifest.tsv"
@@ -1239,12 +1254,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Optional subsample count for testing (random sample).",
     )
     ap.add_argument(
-        "--workers", type=int, default=10, help="Number of parallel worker processes."
+        "--workers", type=int, default=5, help="Number of parallel worker processes."
     )
     ap.add_argument(
         "--flush-every",
         type=int,
-        default=500,
+        default=100,
         help="Rebuild master log every N completed files.",
     )
     ap.add_argument(
@@ -1268,7 +1283,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--pixelmed-concurrency",
         type=int,
         default=None,
-        help="Maximum concurrent PixelMed JVM redactions. Defaults to min(4, workers).",
+        help="Maximum concurrent PixelMed JVM redactions. Defaults to workers.",
     )
     ap.add_argument(
         "--pixelmed-frame-batch-size",
@@ -1397,12 +1412,9 @@ def main() -> None:
     n_workers = max(1, int(args.workers))
     chunksize = max(1, int(args.chunksize))
     flush_every = max(1, int(args.flush_every))
-    pixelmed_concurrency = (
-        min(4, n_workers)
-        if args.pixelmed_concurrency is None
-        else max(1, int(args.pixelmed_concurrency))
+    pixelmed_concurrency = resolve_pixelmed_concurrency(
+        args.pixelmed_concurrency, n_workers
     )
-    pixelmed_concurrency = min(pixelmed_concurrency, n_workers)
     pixelmed_semaphore = ctx.BoundedSemaphore(pixelmed_concurrency)
 
     # --- WRITE METRICS HEADER (RUN CONFIG) ---

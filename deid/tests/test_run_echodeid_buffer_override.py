@@ -104,6 +104,45 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
         )
         self.assertIsNone(args.buffer_pct)
 
+    def test_parse_args_defaults_flush_every_to_100(self):
+        args = run_echodeid.parse_args(
+            [
+                "--input-root",
+                "/tmp/in",
+                "--output-root",
+                "/tmp/out",
+                "--recipe-path",
+                "/tmp/recipe",
+            ]
+        )
+        self.assertEqual(args.flush_every, 100)
+
+    def test_parse_args_defaults_workers_to_5(self):
+        args = run_echodeid.parse_args(
+            [
+                "--input-root",
+                "/tmp/in",
+                "--output-root",
+                "/tmp/out",
+                "--recipe-path",
+                "/tmp/recipe",
+            ]
+        )
+        self.assertEqual(args.workers, 5)
+
+    def test_parse_args_defaults_pixelmed_frame_batch_size_to_32(self):
+        args = run_echodeid.parse_args(
+            [
+                "--input-root",
+                "/tmp/in",
+                "--output-root",
+                "/tmp/out",
+                "--recipe-path",
+                "/tmp/recipe",
+            ]
+        )
+        self.assertEqual(args.pixelmed_frame_batch_size, 32)
+
     def test_parse_args_accepts_valid_buffer_pct_values(self):
         for value in ("0", "0.02", "0.5", "1.0"):
             args = run_echodeid.parse_args(
@@ -130,6 +169,15 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
             run_echodeid.resolve_buffer_pct(0.02, "ACUSON", "SEQUOIA"),
             0.02,
         )
+
+    def test_resolve_pixelmed_concurrency_defaults_to_worker_count(self):
+        self.assertEqual(run_echodeid.resolve_pixelmed_concurrency(None, 10), 10)
+
+    def test_resolve_pixelmed_concurrency_uses_smaller_explicit_value(self):
+        self.assertEqual(run_echodeid.resolve_pixelmed_concurrency(3, 10), 3)
+
+    def test_resolve_pixelmed_concurrency_caps_to_worker_count(self):
+        self.assertEqual(run_echodeid.resolve_pixelmed_concurrency(20, 10), 10)
 
     def test_process_one_cli_override_bypasses_table_lookup(self):
         with tempfile.TemporaryDirectory() as tmpdir:

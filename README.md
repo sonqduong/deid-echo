@@ -94,28 +94,19 @@ python run_echodeid.py \
   --input-root /path/to/originaldicomfiles \
   --output-root /path/to/deiddicomfiles \
   --recipe-path deidecho_recipe \
-  --jpeg-baseline-backend auto \
-  --workers 10 \
-  --flush-every 100 \
   --salt 123
 
 #for windows (powershell)
  python run_echodeid.py `
   --input-root "C:\path\to\originaldicomfiles" `
-  --output-root "C:\path\to\deiddicomgfiles" `
+  --output-root "C:\path\to\deiddicomfiles" `
   --recipe-path "deidecho_recipe" `
-  --jpeg-baseline-backend auto `
-  --workers 10 `
-  --flush-every 100 `
   --salt 123
 ```
 
-Notes: several comand line args are provided, most important is parallelizaiton with --workers which will significantly increase RAM needs
+Notes The defaults are set to run on a smaller computer without hitting memory limits. There are several other command line arguments provided to speed up processing.  These will increase RAM needs.  Review the logs-- if some long acquistions seem to be erroring due to out of memory, then adjust these knobs. 
 
-- Like the original `deid`, this software performs de-identification in two stages:
-
-  1) metadata (DICOM header) cleaning, and
-  2) pixel data cleaning.
+ 
 - Like the original `deid`, this is driven by a **Recipe** (provided in
   `deidecho_run/deidecho_recipe`).
 - **Metadata header rewrites**
@@ -137,9 +128,6 @@ Notes: several comand line args are provided, most important is parallelizaiton 
     a new path, which is important when metadata identifiers are embedded in
     the original filename.
 - **Pixel cleaning** is performed on the newly header-cleaned DICOM file.
-  (Yes—this means the header-cleaned file is written to disk, then re-read and
-  re-written after pixel cleaning. This is not efficient, but it follows the
-  processing model used by `deid`.)
 
   - The original `deid` recipe followed the CTP de-identification protocol,
     which prespecifies coordinates to black out based on ultrasound machine
@@ -152,9 +140,7 @@ Notes: several comand line args are provided, most important is parallelizaiton 
     found that this approach could obscure clinically relevant regions, such
     as the scale bar on spectral Doppler traces.
   - The solution implemented here constructs bounding boxes based on the
-    **top-most coordinates**, extended by a small number of additional pixels
-    to ensure complete removal of acquisition date/time. Bounding boxes are
-    only considered when **Tissue, Color, or Doppler data** are present, as
+    **top-most coordinates** of relecant **Tissue, Color, or Doppler data** as
     defined by metadata tags. This approach was found to preserve the maximum
     amount of useful image content while ensuring no PHI leakage.
 - **Support for parallelization** is provided for large-scale processing.
@@ -167,47 +153,17 @@ Notes: several comand line args are provided, most important is parallelizaiton 
     Additional logs are created during parallel execution that allow the process
     to be resumed if it crashes.
 
-### HPC / batch usage
+### High Performance Computing Usage
+Increase these settings to obtain faster batch processing:
+--workers: 40 \
+--chunksize: 32 \
+--max-tasks-per-child: 50 \
+--pixelmed-concurrency: 24 \
+--pixelmed-frame-batch-size: 32 \
+--pixelmed-java-xmx: 1g \
+--flush-every: 1000 \
 
-For JPEG Baseline redaction, `deid-echo` can use a faster PixelMed-backed path.
-Batch jobs should make that dependency chain explicit instead of relying on an
-implicit fallback.
-
-- Prefer activating the conda environment before running:
-
-  ```bash
-  conda activate deid-echo
-  ```
-
-- If you call the environment's Python directly instead, also expose the env's
-  Java tools:
-
-  ```bash
-  ENV_ROOT=/path/to/.conda/envs/deid-echo
-  export PATH="$ENV_ROOT/bin:$PATH"
-  ```
-
-  or set:
-
-  ```bash
-  export DEIDECHO_JAVA="$ENV_ROOT/bin/java"
-  export DEIDECHO_JAVAC="$ENV_ROOT/bin/javac"
-  ```
-
-- Recommended cluster setting when you want the job to fail fast instead of
-  silently degrading to the slower Python JPEG Baseline path:
-
-  ```bash
-  --jpeg-baseline-backend require-pixelmed
-  ```
-
-- Recommended preflight lines in the batch script:
-
-  ```bash
-  java -version
-  javac -version
-  ls -l deidecho_run/vendor/pixelmed_codec.jar
-  ```
+(pixelmed-concurency note: unset by default, and resolves to max workers: big memory consumer)
 
 **Known gotchas:**
 
