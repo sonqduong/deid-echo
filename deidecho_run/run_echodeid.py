@@ -172,20 +172,20 @@ FINAL_COLUMNS = [
 # ---------------- Dictionary of Top Mask overrides beyond upper bounding box ----------------
 # Keyed by (Manufacturer, ManufacturerModelName), defaults to 1%
 
-BUFFER_PCT_DEFAULT = 0.01
+BUFFER_PCT_DEFAULT = 0.00
 
 BUFFER_PCT_BY_MFG_MODEL: Dict[Tuple[str, str], float] = {
-    ("ACUSON", "CYPRESS"): 0.10,
-    ("GE HEALTHCARE", "VIVID I"): 0.07,
-    ("GE ULTRASOUND", "VIVID T8"): 0.07,
-    ("GE VINGMED ULTRASOUND", "VIVID E9"): 0.06,
-    ("GE VINGMED ULTRASOUND", "VIVID E95"): 0.05,
-    ("GE VINGMED ULTRASOUND", "VIVID T9"): 0.05,
-    ("GE VINGMED ULTRASOUND", "VIVID7"): 0.07,
-    ("GEMS ULTRASOUND", "VIVID7"): 0.08,
-    ("GEMS ULTRASOUND", "VIVID I"): 0.06,
-    ("GEMS ULTRASOUND", "VIVID Q"): 0.06,
-    ("ACUSON", "SEQUOIA"): 0.50,
+    ("ACUSON", "CYPRESS"): 0.08,
+    ("GE HEALTHCARE", "VIVID I"): 0.05,
+    ("GE ULTRASOUND", "VIVID T8"): 0.05,
+    ("GE VINGMED ULTRASOUND", "VIVID E9"): 0.04,
+    ("GE VINGMED ULTRASOUND", "VIVID E95"): 0.03,
+    ("GE VINGMED ULTRASOUND", "VIVID T9"): 0.03,
+    ("GE VINGMED ULTRASOUND", "VIVID7"): 0.05,
+    ("GEMS ULTRASOUND", "VIVID7"): 0.06,
+    ("GEMS ULTRASOUND", "VIVID I"): 0.04,
+    ("GEMS ULTRASOUND", "VIVID Q"): 0.04,
+    ("ACUSON", "SEQUOIA"): 0.03,
     # add more:
     # Use wildcards i.e ("*", "*") as a global fallback or specific manufacturer.
     # case insensitive

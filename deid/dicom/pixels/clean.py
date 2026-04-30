@@ -28,6 +28,8 @@ bot.level = 3
 
 # JPEG-LS Lossless Transfer Syntax UID (DICOM: 1.2.840.10008.1.2.4.80)
 _JPEGLS_LOSSLESS_UID = UID("1.2.840.10008.1.2.4.80")
+_US_MULTIFRAME_SOP_CLASS_UID = UID("1.2.840.10008.5.1.4.1.1.3.1")
+_US_SINGLE_FRAME_SOP_CLASS_UID = UID("1.2.840.10008.5.1.4.1.1.6.1")
 
 
 def _mask_shape_from_pixel_array(
@@ -290,8 +292,21 @@ def _save_cleaned_array_to_dicom(
             1 if numpy.issubdtype(arr.dtype, numpy.signedinteger) else 0
         )
 
-    # JPEG-LS branch or uncompressed fallback
-    if jpeg_ls:
+    sop_class_uid = str(
+        getattr(dicom, "SOPClassUID", getattr(dicom, "SOP_CLASS_UID", "")) or ""
+    )
+    if sop_class_uid == str(_US_MULTIFRAME_SOP_CLASS_UID):
+        is_multiframe = True
+    elif sop_class_uid == str(_US_SINGLE_FRAME_SOP_CLASS_UID):
+        is_multiframe = False
+    else:
+        # Fall back to the cleaned array shape when SOP Class UID is absent or
+        # not one of the ultrasound storage classes we special-case.
+        is_multiframe = arr.ndim == 4 or (arr.ndim == 3 and arr.shape[-1] != 3)
+
+    # JPEG-LS branch or uncompressed fallback. Still frames are always written
+    # uncompressed for downstream viewer compatibility.
+    if jpeg_ls and is_multiframe:
         try:
             dicom.compress(_JPEGLS_LOSSLESS_UID, generate_instance_uid=False)
             dicom.file_meta.TransferSyntaxUID = _JPEGLS_LOSSLESS_UID
@@ -308,7 +323,9 @@ def _save_cleaned_array_to_dicom(
             )
     else:
         dicom.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-        bot.debug(f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}")
+        bot.debug(
+            f"[clean.save] writing uncompressed tsuid={dicom.file_meta.TransferSyntaxUID}"
+        )
 
     dicom.save_as(dicom_name)
     bot.debug(f"[clean.save] wrote: {dicom_name}")
@@ -478,7 +495,7 @@ class DicomCleaner:
         self,
         output_folder=None,
         image_type="cleaned",
-        jpeg_ls: bool = True,  # hardcoded one option for compression JPEG-LS Lossless
+        jpeg_ls: bool = True,
         filename=None,
     ):
         """
@@ -487,9 +504,10 @@ class DicomCleaner:
         Parameters
         ----------
         jpeg_ls : bool
-            If True (default), compress using JPEG-LS Lossless (1.2.840.10008.1.2.4.80)
-            and rewrite file_meta.TransferSyntaxUID accordingly.
-            If False, save uncompressed Explicit VR Little Endian.
+            If True (default), multi-frame outputs are compressed using JPEG-LS
+            Lossless (1.2.840.10008.1.2.4.80). Still-frame outputs are always
+            saved uncompressed as Explicit VR Little Endian. If False, all
+            outputs are saved uncompressed.
 
         If `filename` is provided, it's used directly (no auto 'cleaned-' prefix).
         If `filename` is missing an extension or has the wrong one, '.dcm' is enforced.
