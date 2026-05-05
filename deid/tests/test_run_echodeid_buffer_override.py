@@ -104,6 +104,33 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
         )
         self.assertIsNone(args.buffer_pct)
 
+    def test_parse_args_defaults_strictmask_to_false(self):
+        args = run_echodeid.parse_args(
+            [
+                "--input-root",
+                "/tmp/in",
+                "--output-root",
+                "/tmp/out",
+                "--recipe-path",
+                "/tmp/recipe",
+            ]
+        )
+        self.assertFalse(args.strictmask)
+
+    def test_parse_args_accepts_strictmask_flag(self):
+        args = run_echodeid.parse_args(
+            [
+                "--input-root",
+                "/tmp/in",
+                "--output-root",
+                "/tmp/out",
+                "--recipe-path",
+                "/tmp/recipe",
+                "--strictmask",
+            ]
+        )
+        self.assertTrue(args.strictmask)
+
     def test_parse_args_defaults_flush_every_to_100(self):
         args = run_echodeid.parse_args(
             [
@@ -179,6 +206,23 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
     def test_resolve_pixelmed_concurrency_caps_to_worker_count(self):
         self.assertEqual(run_echodeid.resolve_pixelmed_concurrency(20, 10), 10)
 
+    def test_build_strictmask_results_intersects_top_band_and_boxes(self):
+        top_results = {
+            "flagged": True,
+            "results": [{"coordinates": [[0, "all"], [1, "0,2,4,4"]]}],
+        }
+        box_results = {
+            "flagged": True,
+            "results": [{"coordinates": [[0, "all"], [1, "0,0,1,4"]]}],
+        }
+
+        merged = run_echodeid.build_strictmask_results(top_results, box_results, 4, 4)
+        merged_mask = run_echodeid.build_mask_from_results(merged, 4, 4)
+
+        self.assertEqual(merged_mask[0, 0], 0)
+        self.assertEqual(merged_mask[2, 0], 1)
+        self.assertEqual(merged_mask[2, 1], 0)
+
     def test_process_one_cli_override_bypasses_table_lookup(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             ds = _make_dataset("1.2.840.10008.1.2.1")
@@ -214,6 +258,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(log_dir),
                     run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
                     0.25,
+                    False,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,
                     run_echodeid.TRAITS,
@@ -224,6 +269,54 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
         self.assertTrue(_FakeCleaner.clean_called)
         self.assertEqual(row["status"], "success")
         self.assertIn("/deidentified/", row["header_path"])
+        self.assertEqual(_FakeCleaner.detect_calls[0]["mask_above_top"], True)
+
+    def test_process_one_strictmask_detects_top_band_and_boxes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ds = _make_dataset("1.2.840.10008.1.2.1")
+            out_root = Path(tmpdir) / "out"
+            log_dir = Path(tmpdir) / "logs"
+            out_root.mkdir()
+            log_dir.mkdir()
+
+            parser = _FakeParser("ignored", dicom=ds)
+            with patch.object(run_echodeid, "read_dicom_metadata", return_value=ds), patch.object(
+                run_echodeid, "DicomParser", return_value=parser
+            ), patch.object(
+                run_echodeid, "DicomCleaner", _FakeCleaner
+            ), patch.object(
+                run_echodeid, "extract_region_spatial_formats", return_value=[1]
+            ), patch.object(
+                run_echodeid,
+                "clean_pixel_data_to_file",
+                side_effect=_fake_clean_pixel_data_to_file,
+            ), patch.object(
+                run_echodeid, "append_row_to_worker_csv"
+            ), patch.object(
+                run_echodeid, "read_transfer_syntax_uid", side_effect=["1.2.840.10008.1.2.1", "1.2.840.10008.1.2.1"]
+            ):
+                row = run_echodeid.process_one(
+                    "input.dcm",
+                    0,
+                    tmpdir,
+                    str(out_root),
+                    "/tmp/recipe",
+                    str(log_dir),
+                    run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
+                    0.25,
+                    True,
+                    run_echodeid.ALLOWED_SOP,
+                    run_echodeid.ALLOWED_RSF,
+                    run_echodeid.TRAITS,
+                    run_echodeid.FINAL_COLUMNS,
+                )
+
+        self.assertEqual(len(_FakeCleaner.detect_calls), 2)
+        self.assertEqual(
+            [call["mask_above_top"] for call in _FakeCleaner.detect_calls],
+            [True, False],
+        )
+        self.assertEqual(row["status"], "success")
 
     def test_process_one_uses_cli_override_for_jpeg_baseline_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -260,6 +353,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(log_dir),
                     run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
                     0.02,
+                    False,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,
                     run_echodeid.TRAITS,
@@ -304,6 +398,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(log_dir),
                     run_echodeid.JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED,
                     0.02,
+                    False,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,
                     run_echodeid.TRAITS,
@@ -350,6 +445,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(log_dir),
                     run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
                     None,
+                    False,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,
                     run_echodeid.TRAITS,
@@ -385,6 +481,7 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
                     str(log_dir),
                     run_echodeid.JPEG_BASELINE_BACKEND_AUTO,
                     None,
+                    False,
                     run_echodeid.ALLOWED_SOP,
                     run_echodeid.ALLOWED_RSF,
                     run_echodeid.TRAITS,

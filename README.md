@@ -104,9 +104,9 @@ python run_echodeid.py \
   --salt 123
 ```
 
-Notes The defaults are set to run on a smaller computer without hitting memory limits. There are several other command line arguments provided to speed up processing.  These will increase RAM needs.  Review the logs-- if some long acquistions seem to be erroring due to out of memory, then adjust these knobs. 
+Notes The defaults are set to run on a smaller computer without hitting memory limits. There are several other command line arguments provided to speed up processing.  These will increase RAM needs.  Review the logs-- if some long acquistions seem to be erroring due to out of memory, then adjust these knobs.
 
- 
+
 - Like the original `deid`, this is driven by a **Recipe** (provided in
   `deidecho_run/deidecho_recipe`).
 - **Metadata header rewrites**
@@ -163,14 +163,16 @@ Increase these settings to obtain faster batch processing:
 --pixelmed-java-xmx: 1g \
 --flush-every: 1000 \
 
-(pixelmed-concurency note: unset by default, and resolves to max workers: big memory consumer)
+(pixelmed-concurency note: unset by default, and resolves to max workers. This is possibly a big memory consumer)
 
 **Known gotchas:**
-
+- By default, pixel masking uses the current "mask above top" behavior. Pass
+  `--strictmask` to keep only the eligible ultrasound region boxes that also fall
+    within the buffered top-band keep area, blacking out everything else.  If you are noticing PHI in unusual places this option with or without increasing the buffer_pct can  possibly address those issues.
 - A built-in filter restricts processing to SOPClassUIDs corresponding to
   ultrasound and ultrasound multi-frame images. All other SOP classes are
   skipped.
 - If bounding box coordinates are not supplied in the metadata, the file is
   skipped, as these tags are required for the de-identification process.
-- To our knowledge, 3D volume data are skipped and not processed, as they do not
+- Some 3D volume data are skipped and not processed, as they do not
   contain the standard metadata tags required for de-identification.
