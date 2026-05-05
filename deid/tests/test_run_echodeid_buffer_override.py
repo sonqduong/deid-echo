@@ -91,6 +91,23 @@ class TestRunEchoDeidBufferOverride(unittest.TestCase):
         _FakeCleaner.clean_called = False
         _FakeCleaner.saved_paths = []
 
+    def test_parse_args_defaults_recipe_path_to_none_until_resolved(self):
+        args = run_echodeid.parse_args(
+            [
+                "--input-root",
+                "/tmp/in",
+                "--output-root",
+                "/tmp/out",
+            ]
+        )
+        self.assertIsNone(args.recipe_path)
+
+    def test_resolve_recipe_path_returns_bundled_recipe_when_omitted(self):
+        self.assertEqual(
+            run_echodeid.resolve_recipe_path(None),
+            run_echodeid.DEFAULT_RECIPE_PATH,
+        )
+
     def test_parse_args_omitted_buffer_pct_is_none(self):
         args = run_echodeid.parse_args(
             [

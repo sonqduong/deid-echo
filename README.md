@@ -62,7 +62,7 @@ pip install git+https://github.com/sonqduong/deid-echo.git
 
 - Place **all input echocardiogram DICOM files** under a **single input directory**.
 - Provide a **separate output directory** (not a subfolder of the input directory) where de-identified DICOMs will be written.
-- Provide a path to the recipe (default recipe lives in `deidecho_run/deidecho_recipe`).
+- Optionally provide a custom recipe via `--recipe-path`. If omitted, the bundled default recipe at `deidecho_run/deidecho_recipe` is used.
 
 > Note: Because metadata is used for hashing, it is best **not** to pre-clean metadata.
 > This tool is built to work on files as they are stored natively in the PACS.
@@ -87,24 +87,68 @@ Provide the salt passphrase either:
 
 ```bash
 conda activate deid-echo  # or however you activate your environment
-cd /path/to/workingdirectory/deid-echo/deidecho_run
+cd /path/to/workingdirectory/deid-echo
 
 #for linux/mac
-python run_echodeid.py \
+python -m deidecho_run.run_echodeid \
   --input-root /path/to/originaldicomfiles \
   --output-root /path/to/deiddicomfiles \
-  --recipe-path deidecho_recipe \
   --salt 123
 
 #for windows (powershell)
- python run_echodeid.py `
+ python -m deidecho_run.run_echodeid `
   --input-root "C:\path\to\originaldicomfiles" `
   --output-root "C:\path\to\deiddicomfiles" `
-  --recipe-path "deidecho_recipe" `
   --salt 123
 ```
 
-Notes The defaults are set to run on a smaller computer without hitting memory limits. There are several other command line arguments provided to speed up processing.  These will increase RAM needs.  Review the logs-- if some long acquistions seem to be erroring due to out of memory, then adjust these knobs.
+If you want to override the bundled recipe, add:
+
+```bash
+--recipe-path /path/to/custom_recipe
+```
+
+## Docker
+
+Build the image from the repository root:
+
+```bash
+docker build -t deid-echo .
+```
+
+Run the container with separate input and output mounts:
+
+```bash
+docker run --rm \
+  -e SECRET_SALT=123 \
+  -v /path/to/originaldicomfiles:/input:ro \
+  -v /path/to/deiddicomfiles:/output \
+  deid-echo \
+  --input-root /input \
+  --output-root /output
+```
+
+If you want output files owned by your current Linux user, add:
+
+```bash
+--user "$(id -u):$(id -g)"
+```
+
+If you want to use a custom recipe in Docker, mount it and pass `--recipe-path`:
+
+```bash
+docker run --rm \
+  -e SECRET_SALT=123 \
+  -v /path/to/originaldicomfiles:/input:ro \
+  -v /path/to/deiddicomfiles:/output \
+  -v /path/to/custom_recipe:/config/deidecho_recipe:ro \
+  deid-echo \
+  --input-root /input \
+  --output-root /output \
+  --recipe-path /config/deidecho_recipe
+```
+
+Notes The defaults are set to run on a smaller computer without hitting memory limits. There are several other command line arguments provided to speed up processing. These will increase RAM needs. Review the logs; if some long acquisitions seem to be erroring due to out of memory, then adjust these knobs.
 
 
 - Like the original `deid`, this is driven by a **Recipe** (provided in

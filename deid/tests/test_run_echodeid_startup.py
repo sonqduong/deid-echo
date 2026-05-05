@@ -11,6 +11,10 @@ class TestRunEchoDeidStartup(unittest.TestCase):
     def test_field_expansion_is_not_unbounded_cached(self):
         self.assertFalse(hasattr(fields._get_fields_inner, "cache_info"))
 
+    def test_default_recipe_path_points_to_bundled_recipe(self):
+        self.assertTrue(run_echodeid.DEFAULT_RECIPE_PATH.is_file())
+        self.assertEqual(run_echodeid.DEFAULT_RECIPE_PATH.name, "deidecho_recipe")
+
     def test_assess_jpeg_baseline_backend_python_only_skips_preflight(self):
         status = run_echodeid.assess_jpeg_baseline_backend(
             run_echodeid.JPEG_BASELINE_BACKEND_PYTHON_ONLY

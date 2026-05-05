@@ -90,6 +90,7 @@ JPEG_BASELINE_BACKEND_CHOICES = (
     JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED,
     JPEG_BASELINE_BACKEND_PYTHON_ONLY,
 )
+DEFAULT_RECIPE_PATH = Path(__file__).resolve().with_name("deidecho_recipe")
 
 ALLOWED_SOP: Set[str] = {
     "1.2.840.10008.5.1.4.1.1.3.1",  # US multi-frame
@@ -255,6 +256,15 @@ def validate_jpeg_baseline_backend(backend: str) -> str:
             f"--jpeg-baseline-backend must be one of {choices}; got {backend!r}"
         )
     return value
+
+
+def resolve_recipe_path(recipe_path: Optional[Path]) -> Path:
+    """
+    Resolve the recipe path, defaulting to the bundled echo recipe.
+    """
+    if recipe_path is None:
+        return DEFAULT_RECIPE_PATH
+    return Path(recipe_path).expanduser()
 
 
 def resolve_pixelmed_concurrency(
@@ -1316,7 +1326,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Output root for de-identified DICOMs + logs.",
     )
     ap.add_argument(
-        "--recipe-path", required=True, type=Path, help="Path to deid recipe"
+        "--recipe-path",
+        type=Path,
+        default=None,
+        help=(
+            "Path to deid recipe. Defaults to the bundled recipe at "
+            f"{DEFAULT_RECIPE_PATH}."
+        ),
     )
     ap.add_argument(
         "--salt",
@@ -1429,7 +1445,9 @@ def main() -> None:
 
     INPUT_ROOT = args.input_root
     OUTPUT_ROOT = args.output_root
-    RECIPE_PATH = args.recipe_path
+    RECIPE_PATH = resolve_recipe_path(args.recipe_path)
+    if not RECIPE_PATH.is_file():
+        raise FileNotFoundError(f"Recipe path does not exist: {RECIPE_PATH}")
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     DEIDENTIFIED_ROOT = OUTPUT_ROOT / "deidentified"
