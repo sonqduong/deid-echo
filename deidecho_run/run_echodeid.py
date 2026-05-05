@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 import pydicom
 
 try:
@@ -495,10 +496,7 @@ def jpeg_baseline_redact_overwrite_inplace(
         global _PIXELMED_AUTO_UNAVAILABLE_ERROR
         if backend == JPEG_BASELINE_BACKEND_PYTHON_ONLY:
             pass
-        elif (
-            backend == JPEG_BASELINE_BACKEND_AUTO
-            and _PIXELMED_AUTO_UNAVAILABLE_ERROR
-        ):
+        elif backend == JPEG_BASELINE_BACKEND_AUTO and _PIXELMED_AUTO_UNAVAILABLE_ERROR:
             compressed_errors.append(
                 "pixelmed_jpeg_baseline_unavailable="
                 f"{_PIXELMED_AUTO_UNAVAILABLE_ERROR}"
@@ -553,6 +551,66 @@ def jpeg_baseline_redact_overwrite_inplace(
         compressed_errors.append(f"python_jpeg_baseline={e!r}")
 
     return False, " | ".join(compressed_errors), ""
+
+
+def _results_to_keep_mask(
+    results: Dict[str, Any], rows: int, columns: int
+) -> np.ndarray:
+    """
+    Convert pixel-cleaning results to a keep mask.
+
+    A flagged result with no valid keep coordinates is treated as an all-redact
+    mask so strictmask can still intersect with the other keep region safely.
+    """
+    try:
+        return build_mask_from_results(results, rows, columns)
+    except RuntimeError as exc:
+        if "no valid masking coordinates" not in str(exc):
+            raise
+        return np.zeros((rows, columns), dtype=np.uint8)
+
+
+def build_strictmask_results(
+    top_results: Dict[str, Any],
+    box_results: Dict[str, Any],
+    rows: int,
+    columns: int,
+) -> Dict[str, Any]:
+    """
+    Keep only pixels that are inside the eligible boxes and also inside the
+    buffered top-mask keep region.
+    """
+    if not top_results.get("flagged") and not box_results.get("flagged"):
+        return top_results
+
+    keep_mask = np.minimum(
+        _results_to_keep_mask(top_results, rows, columns),
+        _results_to_keep_mask(box_results, rows, columns),
+    )
+
+    keep_rectangles = mask_to_redaction_rectangles(keep_mask.astype(bool))
+    coordinates: List[List[Any]] = [[0, "all"]]
+    if keep_rectangles:
+        coordinates.append(
+            [
+                1,
+                [
+                    f"{x},{y},{x + width},{y + height}"
+                    for x, y, width, height in keep_rectangles
+                ],
+            ]
+        )
+
+    return {
+        "flagged": True,
+        "results": [
+            {
+                "reason": "strictmask keep intersection",
+                "group": "strictmask",
+                "coordinates": coordinates,
+            }
+        ],
+    }
 
 
 def discover_dicom_files(input_root: Path) -> List[Path]:
@@ -652,10 +710,14 @@ def prepare_todo_files(
     """
     Discover or load input files, optionally subsample, and apply resume filtering.
     """
-    manifest = None if refresh_file_list else load_input_manifest(
-        input_root=input_root,
-        log_dir=log_dir,
-        subsample=subsample,
+    manifest = (
+        None
+        if refresh_file_list
+        else load_input_manifest(
+            input_root=input_root,
+            log_dir=log_dir,
+            subsample=subsample,
+        )
     )
     if manifest is not None:
         dcm_files, total_files = manifest
@@ -691,6 +753,7 @@ def iter_task_args(
     log_dir: Path,
     jpeg_baseline_backend: str,
     buffer_pct: Optional[float],
+    strictmask: bool,
     pixelmed_frame_batch_size: int,
     pixelmed_java_xmx: str,
     dicom_defer_size: Optional[str],
@@ -706,6 +769,7 @@ def iter_task_args(
             str(log_dir),
             jpeg_baseline_backend,
             buffer_pct,
+            strictmask,
             ALLOWED_SOP,
             ALLOWED_RSF,
             TRAITS,
@@ -725,6 +789,7 @@ def process_one(
     log_dir: str,
     jpeg_baseline_backend: str,
     cli_buffer_pct: Optional[float],
+    strictmask: bool,
     allowed_sop: Set[str],
     allowed_rsf: Set[int],
     traits: List,
@@ -914,10 +979,7 @@ def process_one(
         )
 
         out_dir = (
-            DEIDENTIFIED_ROOT_
-            / hashed_patient_id
-            / hashed_study_uid
-            / series_part
+            DEIDENTIFIED_ROOT_ / hashed_patient_id / hashed_study_uid / series_part
         )
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1033,11 +1095,25 @@ def process_one(
     # --- PIXEL PASS ---
     try:
         pixel_total_start = time.perf_counter()
-        cleaner = DicomCleaner(output_folder=str(out_dir), deid=str(RECIPE_PATH_))
         detect_start = time.perf_counter()
-        cleaner.detect(
+        top_cleaner = DicomCleaner(output_folder=str(out_dir), deid=str(RECIPE_PATH_))
+        top_results = top_cleaner.detect(
             str(header_cleaned_path), mask_above_top=True, buffer_pct=buffer_pct
         )
+        pixel_results = top_results
+        if strictmask:
+            box_cleaner = DicomCleaner(
+                output_folder=str(out_dir), deid=str(RECIPE_PATH_)
+            )
+            box_results = box_cleaner.detect(
+                str(header_cleaned_path), mask_above_top=False, buffer_pct=buffer_pct
+            )
+            pixel_results = build_strictmask_results(
+                top_results,
+                box_results,
+                int(row.get("Rows") or 0),
+                int(row.get("Columns") or 0),
+            )
         row["detect_s"] = _format_elapsed(detect_start)
 
         tsuid_before_pixel = read_transfer_syntax_uid(header_cleaned_path)
@@ -1048,7 +1124,7 @@ def process_one(
             try:
                 fast_ok, fast_err, fast_codec = jpeg_baseline_redact_overwrite_inplace(
                     header_cleaned_path,
-                    cleaner.results,
+                    pixel_results,
                     jpeg_baseline_backend,
                     frame_batch_size=pixelmed_frame_batch_size,
                     java_xmx=pixelmed_java_xmx,
@@ -1117,7 +1193,7 @@ def process_one(
         clean_start = time.perf_counter()
         pixel_cleaned = clean_pixel_data_to_file(
             str(header_cleaned_path),
-            cleaner.results,
+            pixel_results,
             str(header_cleaned_path),
             jpeg_ls=True,
         )
@@ -1318,6 +1394,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Optional global buffer override from 0.0 to 1.0. If provided, this overrides all manufacturer/model buffer settings.",
     )
+    ap.add_argument(
+        "--strictmask",
+        action="store_true",
+        help=(
+            "Keep only the eligible ultrasound region boxes that also fall "
+            "within the buffered top-band keep area, blacking out "
+            "everything else."
+        ),
+    )
     return ap.parse_args(argv)
 
 
@@ -1505,6 +1590,7 @@ def main() -> None:
             log_dir=LOG_DIR,
             jpeg_baseline_backend=args.jpeg_baseline_backend,
             buffer_pct=args.buffer_pct,
+            strictmask=args.strictmask,
             pixelmed_frame_batch_size=args.pixelmed_frame_batch_size,
             pixelmed_java_xmx=args.pixelmed_java_xmx,
             dicom_defer_size=args.dicom_defer_size,
