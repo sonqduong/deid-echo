@@ -12,7 +12,7 @@ LABEL Keep Ultrasound Regions
   keepcoordinates from:SequenceOfUltrasoundRegions
 
 %header
-# Note if using contains function it superscedes remove function so best not to use contains for replace
+# Note if using contains function it superscedes remove function so best not to use contains for replace. also note that Study date must be jittered BEFORE PatientBirthDate for cap at 89 year olds to work.
 REPLACE PatientID deid_func:id_hash
 
 REPLACE SOPInstanceUID deid_func:pydicom_uuid_salt
@@ -22,7 +22,7 @@ REPLACE MediaStorageSOPInstanceUID deid_func:pydicom_uuid_salt
 REPLACE ReferencedSOPInstanceUID deid_func:pydicom_uuid_salt
 
 REPLACE StudyDate deid_func:jitter
-REPLACE PatientBirthDate deid_func:jitter
+REPLACE PatientBirthDate deid_func:jitter_birthdate_cap_89
 BLANK PatientName
 BLANK PatientsName
 BLANK StudyTime

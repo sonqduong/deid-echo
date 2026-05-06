@@ -258,7 +258,9 @@ class DicomParser:
                         fields=fields,
                     )
 
-            # actions on the header
+            # Actions on the header are applied in recipe order. Some deid
+            # functions intentionally depend on earlier header mutations
+            # (for example, jittering StudyDate before capping PatientBirthDate).
             for action in self.recipe.get_actions():
                 self.perform_action(
                     field=action.get("field"),

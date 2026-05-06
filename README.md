@@ -116,11 +116,14 @@ Notes The defaults are set to run on a smaller computer without hitting memory l
 - **Metadata header rewrites**
 
   - Specialized functions were developed to create *deterministic* hashing of
-    UIDs and deterministic date jittering (±365 days), based on a
+    UIDs and deterministic date jittering, based on a
     center-specific secret passphrase and embedded metadata. This allows data
     to be de-identified in a non-random fashion so that relationships between
     person, study, series, instance, and time are preserved *within a given
-    individual*.
+    individual*. `StudyDate` is jittered by a deterministic offset within
+    ±365 days, and `PatientBirthDate` is jittered with the same offset but
+    capped so the released birth date is never more than 89 years before the
+    deidentified study date.
   - All PHI-related metadata tags relevant to echocardiogram ultrasound are
     identified and removed (and can be adjusted as needed in the recipe).
   - The header-cleaned DICOM file is saved **separately** to the following
