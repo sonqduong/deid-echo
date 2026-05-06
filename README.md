@@ -108,46 +108,6 @@ If you want to override the bundled recipe, add:
 --recipe-path /path/to/custom_recipe
 ```
 
-## Docker
-
-Build the image from the repository root:
-
-```bash
-docker build -t deid-echo .
-```
-
-Run the container with separate input and output mounts:
-
-```bash
-docker run --rm \
-  -e SECRET_SALT=123 \
-  -v /path/to/originaldicomfiles:/input:ro \
-  -v /path/to/deiddicomfiles:/output \
-  deid-echo \
-  --input-root /input \
-  --output-root /output
-```
-
-If you want output files owned by your current Linux user, add:
-
-```bash
---user "$(id -u):$(id -g)"
-```
-
-If you want to use a custom recipe in Docker, mount it and pass `--recipe-path`:
-
-```bash
-docker run --rm \
-  -e SECRET_SALT=123 \
-  -v /path/to/originaldicomfiles:/input:ro \
-  -v /path/to/deiddicomfiles:/output \
-  -v /path/to/custom_recipe:/config/deidecho_recipe:ro \
-  deid-echo \
-  --input-root /input \
-  --output-root /output \
-  --recipe-path /config/deidecho_recipe
-```
-
 Notes The defaults are set to run on a smaller computer without hitting memory limits. There are several other command line arguments provided to speed up processing. These will increase RAM needs. Review the logs; if some long acquisitions seem to be erroring due to out of memory, then adjust these knobs.
 
 
@@ -220,3 +180,71 @@ Increase these settings to obtain faster batch processing:
   skipped, as these tags are required for the de-identification process.
 - Some 3D volume data are skipped and not processed, as they do not
   contain the standard metadata tags required for de-identification.
+
+## Docker
+
+Good for Linux hosts and Docker Desktop on macOS/Windows using Linux containers. Not for native Windows containers.
+
+Build the image from the repository root:
+
+```bash
+docker build -t deid-echo .
+```
+
+Run on Linux/macOS:
+
+```bash
+docker run --rm \
+  -e SECRET_SALT=123 \
+  -v /path/to/originaldicomfiles:/input:ro \
+  -v /path/to/deiddicomfiles:/output \
+  deid-echo \
+  --input-root /input \
+  --output-root /output
+```
+
+Run on Windows PowerShell:
+
+```powershell
+docker run --rm `
+  -e SECRET_SALT=123 `
+  -v "C:\path\to\originaldicomfiles:/input:ro" `
+  -v "C:\path\to\deiddicomfiles:/output" `
+  deid-echo `
+  --input-root /input `
+  --output-root /output
+```
+
+If you want Linux-owned output files on a Linux host, add:
+
+```bash
+--user "$(id -u):$(id -g)"
+```
+
+Custom recipe on Linux/macOS:
+
+```bash
+docker run --rm \
+  -e SECRET_SALT=123 \
+  -v /path/to/originaldicomfiles:/input:ro \
+  -v /path/to/deiddicomfiles:/output \
+  -v /path/to/custom_recipe:/config/deidecho_recipe:ro \
+  deid-echo \
+  --input-root /input \
+  --output-root /output \
+  --recipe-path /config/deidecho_recipe
+```
+
+Custom recipe on Windows PowerShell:
+
+```powershell
+docker run --rm `
+  -e SECRET_SALT=123 `
+  -v "C:\path\to\originaldicomfiles:/input:ro" `
+  -v "C:\path\to\deiddicomfiles:/output" `
+  -v "C:\path\to\custom_recipe:/config/deidecho_recipe:ro" `
+  deid-echo `
+  --input-root /input `
+  --output-root /output `
+  --recipe-path /config/deidecho_recipe
+```
