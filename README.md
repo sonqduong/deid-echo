@@ -188,34 +188,46 @@ Increase these settings to obtain faster batch processing:
 
 Good for Linux hosts and Docker Desktop on macOS/Windows using Linux containers. Not for native Windows containers.
 
-Build the image from the repository root:
+Load a provided Docker image archive:
 
 ```bash
-docker build -t deid-echo .
+docker load -i /path/to/deid-echo_2026-05-06_arm64.tar
+```
+
+or
+
+```bash
+docker load -i /path/to/deid-echo_2026-05-06_amd64.tar.gz
+```
+
+Then confirm the loaded image tag:
+
+```bash
+docker image ls deid-echo
 ```
 
 Run on Linux/macOS:
 
 ```bash
 docker run --rm \
-  -e SECRET_SALT=123 \
   -v /path/to/originaldicomfiles:/input:ro \
   -v /path/to/deiddicomfiles:/output \
-  deid-echo \
+  deid-echo:2026-05-06 \
   --input-root /input \
-  --output-root /output
+  --output-root /output \
+  --salt 'your-real-secret'
 ```
 
 Run on Windows PowerShell:
 
 ```powershell
 docker run --rm `
-  -e SECRET_SALT=123 `
   -v "C:\path\to\originaldicomfiles:/input:ro" `
   -v "C:\path\to\deiddicomfiles:/output" `
-  deid-echo `
+  deid-echo:2026-05-06 `
   --input-root /input `
-  --output-root /output
+  --output-root /output `
+  --salt "your-real-secret"
 ```
 
 If you want Linux-owned output files on a Linux host, add:
@@ -228,13 +240,13 @@ Custom recipe on Linux/macOS:
 
 ```bash
 docker run --rm \
-  -e SECRET_SALT=123 \
   -v /path/to/originaldicomfiles:/input:ro \
   -v /path/to/deiddicomfiles:/output \
   -v /path/to/custom_recipe:/config/deidecho_recipe:ro \
-  deid-echo \
+  deid-echo:2026-05-06 \
   --input-root /input \
   --output-root /output \
+  --salt 'your-real-secret' \
   --recipe-path /config/deidecho_recipe
 ```
 
@@ -242,12 +254,12 @@ Custom recipe on Windows PowerShell:
 
 ```powershell
 docker run --rm `
-  -e SECRET_SALT=123 `
   -v "C:\path\to\originaldicomfiles:/input:ro" `
   -v "C:\path\to\deiddicomfiles:/output" `
   -v "C:\path\to\custom_recipe:/config/deidecho_recipe:ro" `
-  deid-echo `
+  deid-echo:2026-05-06 `
   --input-root /input `
   --output-root /output `
+  --salt "your-real-secret" `
   --recipe-path /config/deidecho_recipe
 ```
