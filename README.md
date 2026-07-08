@@ -81,6 +81,8 @@ Provide the salt passphrase either:
 - via environment variable: `SECRET_SALT`, or
 - via CLI: `--salt`
 
+**Institutional collaborator note**: It is important to use the **same** password between runs of the deidentification software, because this allows the patient's coded ID to remain consistent across multiple deidentification runs.  For example, if PatientID 1234 has an two echocardiograms deidentifed at two different time points without using the same passphrase, the the coded patientID will be different across the runs and the collaborator won't be able to tell the two echocardiograms came from the same patient. For users that intend on using this more than once, it is highly recommended to set a persistent environment variable (see above) in your system so the passphrase is not forgotten! The passphrase is also provided in the output sheet if you forget :)
+
 ---
 
 ## Running
@@ -109,7 +111,6 @@ If you want to override the bundled recipe, add:
 ```
 
 Notes The defaults are set to run on a smaller computer without hitting memory limits. There are several other command line arguments provided to speed up processing. These will increase RAM needs. Review the logs; if some long acquisitions seem to be erroring due to out of memory, then adjust these knobs.
-
 
 - Like the original `deid`, this is driven by a **Recipe** (provided in
   `deidecho_run/deidecho_recipe`).
@@ -161,21 +162,23 @@ Notes The defaults are set to run on a smaller computer without hitting memory l
     to be resumed if it crashes.
 
 ### High Performance Computing Usage
+
 Increase these settings to obtain faster batch processing:
---workers: 40 \
---chunksize: 32 \
---max-tasks-per-child: 50 \
---pixelmed-concurrency: 24 \
---pixelmed-frame-batch-size: 32 \
---pixelmed-java-xmx: 1g \
+--workers: 40 
+--chunksize: 32 
+--max-tasks-per-child: 50 
+--pixelmed-concurrency: 24 
+--pixelmed-frame-batch-size: 32 
+--pixelmed-java-xmx: 1g 
 --flush-every: 1000 \
 
 (pixelmed-concurency note: unset by default, and resolves to max workers. This is possibly a big memory consumer)
 
 **Known gotchas:**
+
 - By default, pixel masking uses the current "mask above top" behavior. Pass
   `--strictmask` to keep only the eligible ultrasound region boxes that also fall
-    within the buffered top-band keep area, blacking out everything else.  If you are noticing PHI in unusual places this option with or without increasing the buffer_pct can  possibly address those issues.
+  within the buffered top-band keep area, blacking out everything else.  If you are noticing PHI in unusual places this option with or without increasing the buffer_pct can  possibly address those issues.
 - A built-in filter restricts processing to SOPClassUIDs corresponding to
   ultrasound and ultrasound multi-frame images. All other SOP classes are
   skipped.
@@ -188,7 +191,7 @@ Increase these settings to obtain faster batch processing:
 
 Good for Linux hosts and Docker Desktop on macOS/Windows using Linux containers. Not for native Windows containers.
 
-Load a provided Docker image archive:
+Load a provided Docker image archive, for example:
 
 ```bash
 docker load -i /path/to/deid-echo_2026-05-06_arm64.tar
@@ -228,38 +231,4 @@ docker run --rm `
   --input-root /input `
   --output-root /output `
   --salt "your-real-secret"
-```
-
-If you want Linux-owned output files on a Linux host, add:
-
-```bash
---user "$(id -u):$(id -g)"
-```
-
-Custom recipe on Linux/macOS:
-
-```bash
-docker run --rm \
-  -v /path/to/originaldicomfiles:/input:ro \
-  -v /path/to/deiddicomfiles:/output \
-  -v /path/to/custom_recipe:/config/deidecho_recipe:ro \
-  deid-echo:2026-05-06 \
-  --input-root /input \
-  --output-root /output \
-  --salt 'your-real-secret' \
-  --recipe-path /config/deidecho_recipe
-```
-
-Custom recipe on Windows PowerShell:
-
-```powershell
-docker run --rm `
-  -v "C:\path\to\originaldicomfiles:/input:ro" `
-  -v "C:\path\to\deiddicomfiles:/output" `
-  -v "C:\path\to\custom_recipe:/config/deidecho_recipe:ro" `
-  deid-echo:2026-05-06 `
-  --input-root /input `
-  --output-root /output `
-  --salt "your-real-secret" `
-  --recipe-path /config/deidecho_recipe
 ```
