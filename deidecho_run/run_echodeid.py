@@ -9,6 +9,7 @@ import platform
 import random
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -298,9 +299,15 @@ def assess_jpeg_baseline_backend(backend: str) -> Dict[str, Any]:
             "diagnostics": {
                 "available": False,
                 "java_path": "",
+                "java_version": "",
                 "javac_path": "",
                 "jar_path": "",
+                "bridge_jar_path": "",
                 "class_dir": "",
+                "runtime_compile_allowed": False,
+                "bridge_probe": "",
+                "conda_default_env": os.getenv("CONDA_DEFAULT_ENV", ""),
+                "conda_prefix": os.getenv("CONDA_PREFIX", ""),
                 "error": "",
             },
         }
@@ -322,8 +329,8 @@ def assess_jpeg_baseline_backend(backend: str) -> Dict[str, Any]:
         )
     else:
         message = (
-            "PixelMed unavailable for JPEG Baseline redaction; files will fall back "
-            f"to python_jpeg_baseline. reason={diagnostics['error']}"
+            "PixelMed unavailable; slow Python fallback active for JPEG Baseline "
+            f"redaction. reason={diagnostics['error']}"
         )
 
     return {
@@ -333,6 +340,42 @@ def assess_jpeg_baseline_backend(backend: str) -> Dict[str, Any]:
         "message": message,
         "diagnostics": diagnostics,
     }
+
+
+def format_runtime_check(status: Dict[str, Any]) -> str:
+    diagnostics = status.get("diagnostics", {})
+    lines = [
+        "deid-echo runtime check",
+        f"jpeg_baseline_backend: {status.get('backend', '')}",
+        f"pixelmed_status: {status.get('status', '')}",
+        f"pixelmed_available: {bool(status.get('available'))}",
+        f"pixelmed_message: {status.get('message', '')}",
+    ]
+    for key in (
+        "java_path",
+        "java_version",
+        "jar_path",
+        "bridge_jar_path",
+        "class_dir",
+        "javac_path",
+        "runtime_compile_allowed",
+        "bridge_probe",
+        "conda_default_env",
+        "conda_prefix",
+        "error",
+    ):
+        value = diagnostics.get(key, "")
+        if isinstance(value, bool) or value:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def run_runtime_check(backend: str) -> int:
+    status = assess_jpeg_baseline_backend(backend)
+    print(format_runtime_check(status))
+    if backend == JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED and not status["available"]:
+        return 1
+    return 0
 
 
 # recycle workers every N tasks to limit memory bloat
@@ -1315,13 +1358,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     ap.add_argument(
         "--input-root",
-        required=True,
+        default=None,
         type=Path,
         help="Root folder to recursively scan for DICOM files.",
     )
     ap.add_argument(
         "--output-root",
-        required=True,
+        default=None,
         type=Path,
         help="Output root for de-identified DICOMs + logs.",
     )
@@ -1405,6 +1448,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     ap.add_argument(
+        "--check-runtime",
+        action="store_true",
+        help=(
+            "Print Java/PixelMed runtime diagnostics and exit before requiring "
+            "input, output, or SECRET_SALT."
+        ),
+    )
+    ap.add_argument(
         "--buffer-pct",
         type=float,
         default=None,
@@ -1430,6 +1481,17 @@ def main() -> None:
     )
     args.max_tasks_per_child = max(1, int(args.max_tasks_per_child))
     args.pixelmed_frame_batch_size = max(1, int(args.pixelmed_frame_batch_size))
+
+    if args.check_runtime:
+        raise SystemExit(run_runtime_check(args.jpeg_baseline_backend))
+
+    if args.input_root is None or args.output_root is None:
+        print(
+            "error: --input-root and --output-root are required unless "
+            "--check-runtime is used",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     # ---------------- ENV ----------------
     if args.salt:
@@ -1536,9 +1598,21 @@ def main() -> None:
         f.write(f"# jpeg_baseline_backend: {args.jpeg_baseline_backend}\n")
         f.write(f"# pixelmed_status: {jpeg_backend_status['status']}\n")
         f.write(f"# pixelmed_message: {jpeg_backend_status['message']}\n")
-        for key in ("java_path", "javac_path", "jar_path", "class_dir", "error"):
+        for key in (
+            "java_path",
+            "java_version",
+            "javac_path",
+            "jar_path",
+            "bridge_jar_path",
+            "class_dir",
+            "runtime_compile_allowed",
+            "bridge_probe",
+            "conda_default_env",
+            "conda_prefix",
+            "error",
+        ):
             value = jpeg_backend_status["diagnostics"].get(key, "")
-            if value:
+            if isinstance(value, bool) or value:
                 f.write(f"# pixelmed_{key}: {value}\n")
         f.write(f"# multiprocessing_method: {ctx.get_start_method()}\n")
         f.write(f"# maxtasksperchild: {args.max_tasks_per_child}\n")

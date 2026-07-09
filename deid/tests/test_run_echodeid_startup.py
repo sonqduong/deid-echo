@@ -1,3 +1,4 @@
+from importlib import resources
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,9 +29,15 @@ class TestRunEchoDeidStartup(unittest.TestCase):
         diagnostics = {
             "available": False,
             "java_path": "",
+            "java_version": "",
             "javac_path": "",
             "jar_path": "",
+            "bridge_jar_path": "",
             "class_dir": "",
+            "runtime_compile_allowed": False,
+            "bridge_probe": "",
+            "conda_default_env": "",
+            "conda_prefix": "",
             "error": "javac not found on PATH",
         }
         with patch.object(
@@ -42,16 +49,22 @@ class TestRunEchoDeidStartup(unittest.TestCase):
 
         self.assertEqual(status["status"], "unavailable")
         self.assertFalse(status["available"])
-        self.assertIn("fall back to python_jpeg_baseline", status["message"])
+        self.assertIn("slow Python fallback active", status["message"])
         self.assertIn("javac not found on PATH", status["message"])
 
     def test_assess_jpeg_baseline_backend_require_pixelmed_errors_when_unavailable(self):
         diagnostics = {
             "available": False,
             "java_path": "",
+            "java_version": "",
             "javac_path": "",
             "jar_path": "",
+            "bridge_jar_path": "",
             "class_dir": "",
+            "runtime_compile_allowed": False,
+            "bridge_probe": "",
+            "conda_default_env": "",
+            "conda_prefix": "",
             "error": "java not found on PATH",
         }
         with patch.object(
@@ -64,6 +77,49 @@ class TestRunEchoDeidStartup(unittest.TestCase):
         self.assertEqual(status["status"], "unavailable")
         self.assertIn("required", status["message"])
         self.assertIn("java not found on PATH", status["message"])
+
+    def test_check_runtime_parses_without_input_or_output(self):
+        args = run_echodeid.parse_args(["--check-runtime"])
+
+        self.assertTrue(args.check_runtime)
+        self.assertIsNone(args.input_root)
+        self.assertIsNone(args.output_root)
+
+    def test_runtime_check_returns_nonzero_when_pixelmed_required_unavailable(self):
+        diagnostics = {
+            "available": False,
+            "java_path": "/usr/bin/java",
+            "java_version": "",
+            "javac_path": "",
+            "jar_path": "/tmp/pixelmed_codec.jar",
+            "bridge_jar_path": "",
+            "class_dir": "",
+            "runtime_compile_allowed": False,
+            "bridge_probe": "",
+            "conda_default_env": "",
+            "conda_prefix": "",
+            "error": "PixelMed bridge jar not found",
+        }
+        with patch.object(
+            run_echodeid, "inspect_pixelmed_runtime", return_value=diagnostics
+        ), patch("builtins.print") as print_mock:
+            rc = run_echodeid.run_runtime_check(
+                run_echodeid.JPEG_BASELINE_BACKEND_REQUIRE_PIXELMED
+            )
+
+        self.assertEqual(rc, 1)
+        report = print_mock.call_args.args[0]
+        self.assertIn("pixelmed_status: unavailable", report)
+        self.assertIn("PixelMed bridge jar not found", report)
+
+    def test_deidecho_run_package_resources_are_available(self):
+        root = resources.files("deidecho_run")
+
+        self.assertTrue((root / "deidecho_recipe").is_file())
+        self.assertTrue((root / "vendor" / "pixelmed_codec.jar").is_file())
+        self.assertTrue(
+            (root / "vendor" / "deidecho_pixelmed_bridge.jar").is_file()
+        )
 
     def test_discover_dicom_files_returns_lexically_sorted_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -40,6 +40,9 @@ conda env create -f environment.yml
 conda activate deid-echo
 ```
 
+The environment installs OpenJDK from conda-forge. Collaborators should not
+need a system Java or JDK installation when running inside this environment.
+
 ### Option A (recommended): install from a local clone
 
 ```bash
@@ -104,6 +107,30 @@ python -m deidecho_run.run_echodeid \
   --salt 123
 ```
 
+Before a full run, verify that the fast PixelMed JPEG Baseline path is available:
+
+```bash
+python -m deidecho_run.run_echodeid --check-runtime --jpeg-baseline-backend require-pixelmed
+```
+
+Expected output includes:
+
+```text
+pixelmed_status: available
+pixelmed_available: True
+bridge_jar_path: ...deidecho_pixelmed_bridge.jar
+bridge_probe: ok
+```
+
+It is normal for `javac_path` to be absent. Runtime de-identification uses the
+precompiled bridge jar and only needs the Java runtime provided by the conda
+environment or Docker image.
+
+On Windows, if `java_path` points to something like
+`C:\ProgramData\Oracle\Java\javapath\java.EXE`, the conda environment is likely
+not active or system Java is taking precedence. Reactivate `deid-echo` and rerun
+the runtime check before processing data.
+
 If you want to override the bundled recipe, add:
 
 ```bash
@@ -163,19 +190,31 @@ Notes The defaults are set to run on a smaller computer without hitting memory l
 
 ### High Performance Computing Usage
 
-Increase these settings to obtain faster batch processing:
---workers: 40 
---chunksize: 32 
---max-tasks-per-child: 50 
---pixelmed-concurrency: 24 
---pixelmed-frame-batch-size: 32 
---pixelmed-java-xmx: 1g 
---flush-every: 1000 \
+Increase these settings to obtain faster batch processing after confirming
+`pixelmed_status: available`:
+
+```bash
+python -m deidecho_run.run_echodeid \
+  --input-root /path/to/originaldicomfiles \
+  --output-root /path/to/deiddicomfiles \
+  --salt 'your-real-secret' \
+  --workers 40 \
+  --chunksize 32 \
+  --max-tasks-per-child 50 \
+  --pixelmed-concurrency 24 \
+  --pixelmed-frame-batch-size 32 \
+  --pixelmed-java-xmx 1g \
+  --flush-every 1000
+```
 
 (pixelmed-concurency note: unset by default, and resolves to max workers. This is possibly a big memory consumer)
 
 **Known gotchas:**
 
+- The default JPEG Baseline backend is `auto`. If PixelMed is unavailable, the
+  run continues with the slower Python fallback and logs
+  `PixelMed unavailable; slow Python fallback active`. Use the runtime check
+  above before large runs.
 - By default, pixel masking uses the current "mask above top" behavior. Pass
   `--strictmask` to keep only the eligible ultrasound region boxes that also fall
   within the buffered top-band keep area, blacking out everything else.  If you are noticing PHI in unusual places this option with or without increasing the buffer_pct can  possibly address those issues.

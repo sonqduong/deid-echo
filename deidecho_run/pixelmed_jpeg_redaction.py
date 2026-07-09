@@ -2,8 +2,10 @@
 PixelMed-backed JPEG Baseline selective block redaction helpers.
 
 The Java side uses PixelMed's com.pixelmed.codec.jpeg.Parse.parse() API. This
-module keeps the bridge optional: if Java, javac, or the codec jar is missing,
-callers can catch PixelMedUnavailableError and use another implementation.
+module keeps the bridge optional: if Java or the bundled jars are missing,
+callers can catch PixelMedUnavailableError and use another implementation. A
+developer-only runtime compile fallback can be enabled with
+DEIDECHO_PIXELMED_ALLOW_RUNTIME_COMPILE=1.
 """
 
 from __future__ import annotations
@@ -42,10 +44,14 @@ _PATCHED_ENTROPY_SOURCE = (
     / "EntropyCodedSegment.java"
 )
 _BUNDLED_CODEC_JAR = Path(__file__).resolve().parent / "vendor" / "pixelmed_codec.jar"
+_BUNDLED_BRIDGE_JAR = (
+    Path(__file__).resolve().parent / "vendor" / "deidecho_pixelmed_bridge.jar"
+)
+_ALLOW_RUNTIME_COMPILE_ENV = "DEIDECHO_PIXELMED_ALLOW_RUNTIME_COMPILE"
 
 
 class PixelMedUnavailableError(RuntimeError):
-    """Raised when Java, javac, the bridge source, or the PixelMed jar is missing."""
+    """Raised when Java, required jars, or optional bridge compilation are unavailable."""
 
 
 class PixelMedRedactionError(RuntimeError):
@@ -76,6 +82,22 @@ def resolve_pixelmed_codec_jar() -> Path:
         "PixelMed codec jar not found. Set DEIDECHO_PIXELMED_CODEC_JAR or "
         f"place it at {str(_BUNDLED_CODEC_JAR)}"
     )
+
+
+def resolve_pixelmed_bridge_jar() -> Path:
+    configured = os.getenv("DEIDECHO_PIXELMED_BRIDGE_JAR")
+    jar_path = Path(configured).expanduser() if configured else _BUNDLED_BRIDGE_JAR
+    if jar_path.is_file():
+        return jar_path
+    raise PixelMedUnavailableError(
+        "PixelMed bridge jar not found. Set DEIDECHO_PIXELMED_BRIDGE_JAR or "
+        f"place it at {str(_BUNDLED_BRIDGE_JAR)}"
+    )
+
+
+def pixelmed_runtime_compile_allowed() -> bool:
+    value = os.getenv(_ALLOW_RUNTIME_COMPILE_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _bridge_cache_dir(sources: Sequence[Path], jar_path: Path) -> Path:
@@ -135,16 +157,101 @@ def compile_pixelmed_bridge(
     return class_dir
 
 
+def resolve_pixelmed_bridge_runtime(
+    *,
+    javac_path: Optional[str] = None,
+    jar_path: Optional[Path] = None,
+) -> Dict[str, str]:
+    """
+    Resolve the Java classpath for PixelMed redaction.
+
+    Normal releases use the precompiled bridge jar and do not require javac.
+    Runtime compilation is retained only for development and must be explicitly
+    enabled with DEIDECHO_PIXELMED_ALLOW_RUNTIME_COMPILE=1.
+    """
+    codec_jar = jar_path or resolve_pixelmed_codec_jar()
+    try:
+        bridge_jar = resolve_pixelmed_bridge_jar()
+        return {
+            "classpath": os.pathsep.join([str(bridge_jar), str(codec_jar)]),
+            "bridge_jar_path": str(bridge_jar),
+            "class_dir": "",
+            "javac_path": "",
+        }
+    except PixelMedUnavailableError:
+        if not pixelmed_runtime_compile_allowed():
+            raise
+
+    javac = javac_path or _resolve_executable("DEIDECHO_JAVAC", "javac")
+    class_dir = compile_pixelmed_bridge(javac_path=javac, jar_path=codec_jar)
+    return {
+        "classpath": os.pathsep.join([str(class_dir), str(codec_jar)]),
+        "bridge_jar_path": "",
+        "class_dir": str(class_dir),
+        "javac_path": javac,
+    }
+
+
+def _java_version(java_path: str) -> str:
+    result = subprocess.run(
+        [java_path, "-version"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    detail = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
+    first_line = detail.splitlines()[0] if detail else ""
+    if result.returncode != 0:
+        raise PixelMedUnavailableError(
+            f"java -version failed rc={result.returncode}: {first_line}"
+        )
+    return first_line
+
+
+def _probe_pixelmed_bridge(java_path: str, classpath: str) -> None:
+    payload = _write_payload([], [])
+    result = subprocess.run(
+        [
+            java_path,
+            "-XX:ActiveProcessorCount=1",
+            "-Xss512k",
+            "-cp",
+            classpath,
+            "PixelMedRedactionBridge",
+        ],
+        input=payload,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        stdout = result.stdout.decode("utf-8", errors="replace").strip()
+        detail = stderr or stdout or f"java exited {result.returncode}"
+        raise PixelMedUnavailableError(
+            f"PixelMed bridge smoke test failed: {detail[:500]}"
+        )
+    frames = _read_redacted_frames(result.stdout)
+    if frames:
+        raise PixelMedUnavailableError("PixelMed bridge smoke test returned frames")
+
+
 def inspect_pixelmed_runtime() -> Dict[str, Any]:
     """
     Return structured diagnostics for the PixelMed Java bridge runtime.
     """
+    runtime_compile_allowed = pixelmed_runtime_compile_allowed()
     diagnostics: Dict[str, Any] = {
         "available": False,
         "java_path": "",
+        "java_version": "",
         "javac_path": "",
         "jar_path": "",
+        "bridge_jar_path": "",
         "class_dir": "",
+        "runtime_compile_allowed": runtime_compile_allowed,
+        "bridge_probe": "",
+        "conda_default_env": os.getenv("CONDA_DEFAULT_ENV", ""),
+        "conda_prefix": os.getenv("CONDA_PREFIX", ""),
         "error": "",
     }
 
@@ -154,12 +261,15 @@ def inspect_pixelmed_runtime() -> Dict[str, Any]:
 
         java = _resolve_executable("DEIDECHO_JAVA", "java")
         diagnostics["java_path"] = java
+        diagnostics["java_version"] = _java_version(java)
 
-        javac = _resolve_executable("DEIDECHO_JAVAC", "javac")
-        diagnostics["javac_path"] = javac
+        runtime = resolve_pixelmed_bridge_runtime(jar_path=jar)
+        diagnostics["bridge_jar_path"] = runtime["bridge_jar_path"]
+        diagnostics["class_dir"] = runtime["class_dir"]
+        diagnostics["javac_path"] = runtime["javac_path"]
 
-        class_dir = compile_pixelmed_bridge(javac_path=javac, jar_path=jar)
-        diagnostics["class_dir"] = str(class_dir)
+        _probe_pixelmed_bridge(java, runtime["classpath"])
+        diagnostics["bridge_probe"] = "ok"
         diagnostics["available"] = True
     except PixelMedUnavailableError as exc:
         diagnostics["error"] = str(exc)
@@ -277,8 +387,8 @@ def redact_jpeg_frames_with_pixelmed(
 ) -> List[bytes]:
     jar = jar_path or resolve_pixelmed_codec_jar()
     java = java_path or _resolve_executable("DEIDECHO_JAVA", "java")
-    class_dir = compile_pixelmed_bridge(javac_path=javac_path, jar_path=jar)
-    classpath = os.pathsep.join([str(class_dir), str(jar)])
+    runtime = resolve_pixelmed_bridge_runtime(javac_path=javac_path, jar_path=jar)
+    classpath = runtime["classpath"]
     payload = _write_payload(frames, frame_rectangles)
 
     cmd = [java]

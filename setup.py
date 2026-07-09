@@ -67,6 +67,15 @@ setup(
     url=PACKAGE_URL,
     packages=find_packages(),
     include_package_data=True,
+    package_data={
+        "deidecho_run": [
+            "deidecho_recipe",
+            "vendor/*.jar",
+            "vendor/*.txt",
+            "java/*.java",
+            "java/com/pixelmed/codec/jpeg/*.java",
+        ],
+    },
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
     keywords=KEYWORDS,
@@ -90,5 +99,10 @@ setup(
         "Topic :: Terminals",
         "Topic :: Utilities",
     ],
-    entry_points={"console_scripts": ["deid=deid.main:main"]},
+    entry_points={
+        "console_scripts": [
+            "deid=deid.main:main",
+            "deidecho-run=deidecho_run.run_echodeid:main",
+        ]
+    },
 )

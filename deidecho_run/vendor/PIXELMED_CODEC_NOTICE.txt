@@ -18,11 +18,13 @@ terms:
 The following notice was copied from the COPYRIGHT file in the corresponding
 PixelMed source release:
 
-This repository also compiles a patched copy of PixelMed's
-com.pixelmed.codec.jpeg.EntropyCodedSegment class ahead of the jar on the Java
-classpath. The patch changes redacted DCT blocks from PixelMed's original
-neutral gray target to black luminance with neutral chroma, while preserving the
-same BSD license notice below.
+This repository also vendors deidecho_pixelmed_bridge.jar, compiled from the
+Java sources in deidecho_run/java with Java 8 bytecode compatibility. That jar
+contains PixelMedRedactionBridge plus a patched copy of PixelMed's
+com.pixelmed.codec.jpeg.EntropyCodedSegment class ahead of the PixelMed codec
+jar on the Java classpath. The patch changes redacted DCT blocks from
+PixelMed's original neutral gray target to black luminance with neutral chroma,
+while preserving the same BSD license notice below.
 
 Copyright (c) 2014-2017, David A. Clunie DBA PixelMed Publishing. All rights reserved.
 

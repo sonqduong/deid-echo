@@ -6,6 +6,7 @@
 !Dockerfile
 !README.md
 !LICENSE
+!MANIFEST.in
 !environment.yml
 !setup.py
 !deid/

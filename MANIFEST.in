@@ -1,0 +1,3 @@
+include deidecho_run/deidecho_recipe
+recursive-include deidecho_run/vendor *.jar *.txt
+recursive-include deidecho_run/java *.java
