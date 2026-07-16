@@ -1068,21 +1068,11 @@ def process_one(
         append_row_to_worker_csv(row, out_csv, final_columns)
         return row
 
-    # --- DEAL WITH ZONARE PROBLEM: USE DCMTK DECODE/REWRITE (AFTER HEADER, BEFORE PIXELS) ---
+    # --- USE DCMTK DECODE/REWRITE FOR JPEG LOSSLESS (AFTER HEADER, BEFORE PIXELS) ---
     try:
-        manu = str(row.get("Manufacturer", "") or "").strip().upper()
         tsuid = str(row.get("TransferSyntaxUID_before", "") or "").strip()
-        pc_raw = row.get("PlanarConfiguration_before", "")
 
-        pc_val = None
-        try:
-            pc_val = float(pc_raw) if pc_raw != "" else None
-        except Exception:
-            pc_val = None
-
-        needs_dcmtk = (
-            manu == "ZONARE" and tsuid == "1.2.840.10008.1.2.4.70" and (pc_val == 1.0)
-        )
+        needs_dcmtk = tsuid == "1.2.840.10008.1.2.4.70"
 
         if needs_dcmtk:
             row["dcmtk_rewrite_attempted"] = True
